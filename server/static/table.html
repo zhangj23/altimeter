@@ -25,6 +25,8 @@
   --caution-ink: #81600a;
   --up: #25639e;   /* contribution that raises the needle (validated vs --ask for CVD) */
   --down: #ad3328; /* contribution that lowers it */
+  --diff: #ead8a4;   /* aggregate that over-counts (same as the phone's diff mark) */
+  --joinbg: #efd2c9; /* JOIN that repeats rows */
   --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
   --swing: 1200ms;
   font-size: clamp(15px, 1.25vw, 22px);
@@ -46,15 +48,16 @@ h1 { margin: 0; font-size: 1.6rem; font-weight: 600; letter-spacing: 0.01em; }
 #probeline { flex: 1; font-size: 0.85rem; font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 #link { font-size: 0.85rem; font-weight: 500; color: var(--ink-2); }
 #link.down { color: var(--ask); }
-#howbtn {
+.tog, .seg button {
   font: inherit; font-size: 0.9rem; font-weight: 600; color: var(--ink); background: transparent;
   border: 1.5px solid var(--ink); border-radius: 4px; padding: 0.3rem 1.1rem; cursor: pointer;
 }
-#howbtn[aria-pressed="true"] { background: var(--ink); color: var(--accent-ink); }
-#howbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tog + .tog { margin-left: -1.4rem; }
+.tog[aria-pressed="true"], .seg button[aria-pressed="true"] { background: var(--ink); color: var(--accent-ink); }
+.tog:focus-visible, .seg button:focus-visible, #thr:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 main {
-  flex: 1; min-height: 0; display: grid; grid-template-columns: 1.05fr 1fr; gap: 0 2.6rem; padding: 1.2rem 2rem 0;
+  flex: 1; min-height: 0; display: grid; grid-template-columns: 1.05fr 1fr; grid-template-rows: minmax(0, 1fr); gap: 0 2.6rem; padding: 1.2rem 2rem 0;
 }
 main > section { min-width: 0; min-height: 0; overflow: hidden; }
 /* How swaps the explanation column for the probe internals; the gauge and answer stay put */
@@ -164,6 +167,113 @@ td.null { color: var(--ink-2); font-style: italic; }
 .dbar.down { background: var(--down); }
 .dsum { margin: 0.5rem 0 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 
+/* modes: the check reveal and the coverage view each take over the main area */
+#checkcol, #covcol { display: none; grid-column: 1 / -1; }
+body.check #maincol, body.check #excol, body.check #howcol { display: none; }
+body.check #checkcol { display: flex; flex-direction: column; animation: fade 300ms ease-out both; }
+body.cov #maincol, body.cov #excol, body.cov #howcol, body.cov #checkcol { display: none; }
+body.cov #covcol { display: grid; animation: fade 300ms ease-out both; }
+
+/* check reveal */
+#checkcol h2 { font-size: 1.6rem; max-width: 58ch; }
+.ck-cell { margin: 0.9rem 0 0; font: 500 1rem/1.3 var(--mono); color: var(--ink-2); }
+.reveal { --num: 7rem; display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: end; gap: 0 3.4rem; margin: 0.8rem 0 1.3rem; }
+.ck-cell + .reveal { margin-top: 0.3rem; }
+.rv small { display: block; margin-bottom: 0.15rem; font-size: 1rem; font-weight: 600; color: var(--ink-2); }
+.rv b { position: relative; display: block; font-size: var(--num); font-weight: 600; line-height: 1.02; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rv .txt { transition: opacity 500ms ease-out; }
+.strike {
+  position: absolute; left: -0.05em; right: -0.05em; top: 52%; height: 0.08em; background: var(--ask);
+  transform: scaleX(0); transform-origin: left center; transition: transform 520ms cubic-bezier(.65,0,.35,1);
+}
+.before.struck .strike { transform: scaleX(1); }
+.before.struck .txt { opacity: 0.4; }
+.ratio b { color: var(--ask); }
+.ratio b .x { margin-left: 0.04em; font-size: 0.62em; font-weight: 400; }
+.ratio b .w { margin-left: 0.3em; font-size: max(1.5rem, calc(var(--num) * 0.26)); letter-spacing: 0; }
+.rv.okword b { color: var(--cruise); font-size: calc(var(--num) * 0.42); line-height: 1.15; white-space: normal; }
+.ph { opacity: 0; transform: translateY(0.4rem); transition: opacity 450ms ease-out, transform 450ms cubic-bezier(.22,.61,.36,1); }
+.ph.after { transform: translateX(-0.8rem); }
+.ph.on { opacity: 1; transform: none; }
+.ck-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0 2.6rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+.ck-body > div { min-width: 0; min-height: 0; overflow: hidden; }
+.sqlbox { display: grid; }
+.sqlbox pre {
+  grid-area: 1 / 1; margin: 0; padding: 0.7rem 0.8rem; border-radius: 4px;
+  font: 0.95rem/1.5 var(--mono); white-space: pre-wrap; word-break: break-word;
+}
+.sqlbox .base { background: var(--paper-2); }
+.sqlbox .hl { color: transparent; opacity: 0; transition: opacity 600ms ease-out; }
+.sqlbox .hl.on { opacity: 1; }
+.sqlbox mark { color: var(--ink); }
+.sqlbox .base .gap { color: var(--ink-2); }
+mark.agg, .hkey .agg::before { background: var(--diff); border-bottom: 2px solid var(--caution-ink); }
+mark.join, .hkey .join::before { background: var(--joinbg); border-bottom: 2px solid var(--ask); }
+.hkey { display: flex; flex-wrap: wrap; gap: 0.3rem 1.6rem; margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--ink-2); }
+.hkey span::before { content: ""; display: inline-block; width: 1.1rem; height: 0.75rem; margin-right: 0.4rem; vertical-align: -0.05rem; }
+.hkey .range::before { display: none; }
+.why > * { margin: 0; }
+.why > * + * { margin-top: 0.9rem; }
+.vword { font-size: 2rem; font-weight: 600; line-height: 1.1; color: var(--ask); }
+.vword.ok { color: var(--cruise); }
+.vword.warn { color: var(--caution-ink); }
+.expl { font-size: 1.35rem; line-height: 1.4; max-width: 38ch; }
+.evid { font-size: 0.95rem; }
+.evid th, .evid td { padding-right: 1.6rem; }
+.evid .n { text-align: right; }
+.corhead { margin: 1.1rem 0 0.4rem; font-size: 0.85rem; font-weight: 600; color: var(--ink-2); }
+.why.t1 .expl { font-size: 1.15rem; }
+.why.t1 > * + * { margin-top: 0.7rem; }
+.why.t2 .vword { font-size: 1.6rem; }
+.why.t2 .expl { font-size: 1rem; }
+.why.t2 .evid { font-size: 0.85rem; }
+.why.t3 .expl { font-size: 0.95rem; }
+.why.t3 .evid, .why.t3 .fixline { font-size: 0.8rem; }
+.why.t3 .expl, .why.t3 .fixline { max-width: none; }
+.why.t3 > * + * { margin-top: 0.5rem; }
+.fixline { font-size: 0.95rem; color: var(--ink-2); max-width: 52ch; }
+
+/* coverage */
+#covcol { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 0 3.2rem; }
+.cv-left, .cv-right { min-width: 0; min-height: 0; }
+.cv-right { display: flex; padding: 0.4rem 0 0.8rem; }
+#curve { flex: 1; width: 100%; height: 100%; min-height: 0; overflow: visible; touch-action: none; cursor: crosshair; }
+.cv-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.cv-top h2 { margin: 0; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 4px 0 0 4px; }
+.seg button:last-child { border-radius: 0 4px 4px 0; }
+.seg button + button { border-left: 0; }
+.cv-inst { padding-top: 0.6rem; }
+.cv-tape { position: relative; padding-top: 1.3rem; }
+.cv-tape .bands { opacity: 1; }
+.cv-tape .carriage { transition: none; }
+#thr {
+  -webkit-appearance: none; appearance: none; position: absolute; z-index: 1; left: -10px; width: calc(100% + 20px);
+  top: 0; height: 100%; margin: 0; background: transparent; cursor: ew-resize;
+}
+#thr::-webkit-slider-runnable-track { height: 100%; background: transparent; }
+#thr::-moz-range-track { height: 100%; background: transparent; }
+#thr::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 100%; background: transparent; border: 0; }
+#thr::-moz-range-thumb { width: 20px; height: 100%; border: 0; background: transparent; }
+.ledger { margin-top: 1.2rem; border-top: 1.5px solid var(--ink); }
+.lrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab big" "det big"; align-items: end; gap: 0 1.2rem; padding: 0.6rem 0 0.65rem; border-bottom: 1px solid var(--rule); }
+.lrow .lab { grid-area: lab; font-size: 1.05rem; font-weight: 600; }
+.lrow .det { grid-area: det; font-size: 0.85rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.lrow .big { grid-area: big; font-size: 3rem; font-weight: 600; line-height: 1; text-align: right; font-variant-numeric: tabular-nums; }
+.lrow.ref .big { color: var(--ink-2); }
+#covnote { margin-top: 0.8rem; max-width: 50ch; }
+#curve text { font-family: "Poppins", sans-serif; fill: var(--ink-2); font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--paper); stroke-width: 5px; stroke-linejoin: round; }
+#curve text.strong { fill: var(--ink); font-weight: 600; }
+#curve .axis-l { stroke: var(--ink); stroke-width: 1.5; }
+#curve .grid-l { stroke: var(--paper-2); stroke-width: 1; }
+#curve .line { fill: none; stroke: var(--ink); stroke-width: 2.5; stroke-linejoin: round; }
+#curve .base { stroke: var(--ink-2); stroke-width: 1.5; stroke-dasharray: 6 5; }
+#curve .edge { stroke-width: 2; }
+#curve .cur { stroke: var(--accent); stroke-width: 1.5; }
+#curve .dot { fill: var(--accent); stroke: var(--paper); stroke-width: 3; }
+
 footer {
   display: flex; gap: 1.5rem; align-items: baseline; padding: 0.55rem 2rem 0.7rem; border-top: 1.5px solid var(--ink);
   font-size: 0.85rem; white-space: nowrap; overflow: hidden;
@@ -181,7 +291,8 @@ footer b { font-weight: 600; }
   <h1>Altimeter</h1>
   <span id="probeline"></span>
   <span id="link">Connecting</span>
-  <button id="howbtn" type="button" aria-pressed="false" aria-controls="howcol">How</button>
+  <button id="howbtn" class="tog" type="button" aria-pressed="false" aria-controls="howcol">How</button>
+  <button id="covbtn" class="tog" type="button" aria-pressed="false" aria-controls="covcol">Coverage</button>
 </header>
 <main>
   <section id="maincol">
@@ -199,6 +310,30 @@ footer b { font-weight: 600; }
   </section>
   <section id="excol" aria-live="polite"></section>
   <section id="howcol"></section>
+  <section id="checkcol" aria-live="polite"></section>
+  <section id="covcol">
+    <div class="cv-left">
+      <div class="cv-top">
+        <h2>Answer locally above</h2>
+        <div class="seg" role="group" aria-label="Benchmark">
+          <button type="button" data-src="both" aria-pressed="true">Both</button><button type="button" data-src="bird" aria-pressed="false">BIRD</button><button type="button" data-src="spider" aria-pressed="false">Spider</button>
+        </div>
+      </div>
+      <div class="instrument cv-inst">
+        <div class="readout"><span id="thrval">--</span><small id="thrband"></small></div>
+        <div class="cv-tape">
+          <div class="ticks" id="cvticks"></div>
+          <div class="bands" id="cvbands"></div>
+          <div class="names" id="cvnames"></div>
+          <div class="needle on" aria-hidden="true"><div class="carriage" id="cvcarriage"><i></i><svg width="18" height="13" viewBox="0 0 14 10"><path class="head-fill" d="M0 0H14L7 10Z"/></svg></div></div>
+          <input id="thr" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="Needle threshold for answering locally">
+        </div>
+      </div>
+      <div class="ledger" id="ledger"></div>
+      <p class="cap" id="covnote"></p>
+    </div>
+    <div class="cv-right"><svg id="curve" role="img" aria-label="Accuracy against share of questions answered locally"></svg></div>
+  </section>
 </main>
 <footer><b id="now"></b><span id="queue"></span></footer>
 <script src="table.js"></script>

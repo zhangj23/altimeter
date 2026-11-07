@@ -7,9 +7,10 @@ annotate(result) adds result["audit"] to a worker answer (same shape, without "o
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import sqlglot
 from fastapi import APIRouter
@@ -340,6 +341,26 @@ def explain(sql: str, findings: list[dict[str, Any]]) -> tuple[str, list[dict[st
     return " ".join(sentences), merged
 
 
+_VERBS = {"COUNT": "count", "SUM": "add up", "TOTAL": "add up", "AVG": "average over"}
+
+
+def intended_note(sql: str, findings: list[dict[str, Any]], has_fix: bool) -> str:
+    """One short "was this intended?" line for the first inflated table, or "" when there is nothing to say."""
+    f = next((x for x in findings if x.get("table") not in (None, "*")), None)
+    if f is None:
+        return ""
+    table, alias = f["table"], f["alias"]
+    verb = _VERBS.get(str(f["aggregate"]).split("(", 1)[0].strip().upper(), "aggregate")
+    scope = next((p for _, p in _scopes(sql) if any(a == alias for _, a in p)), [])
+    others = list(dict.fromkeys(t for t, a in scope if a != alias and t != table))
+    if not others:
+        return ""
+    unit = f"{table} and {others[0]} pair" if len(others) == 1 else \
+        f"{table}, " + ", ".join(others[:-1]) + f" and {others[-1]} combination"
+    fix = "use the fix" if has_fix else f"aggregate {table} before the JOIN"
+    return f"If you meant to {verb} every {unit}, this is fine. If you meant to {verb} each {table} row once, {fix}."
+
+
 def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: float = CHECK_AUDIT_TIMEOUT_S,
           original: dict[str, Any] | None = None) -> dict[str, Any]:
     path = db_path(db_id)
@@ -368,6 +389,8 @@ def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: floa
         "findings": a.findings if a else [], "message": a.message if a else "no JOIN + aggregate to audit",
         "audit_error": a.error if a else None,
         "explanation": sentence, "highlights": spans,
+        "intended": intended_note(sql, a.findings, corrected is not None and not corrected.get("error"))
+        if flagged and a else "",
         "original": orig, "corrected": corrected,
         "headline": headline(orig, corrected) if corrected and not corrected.get("error") else None,
         "audit_seconds": round(audit_s, 4),
@@ -400,14 +423,26 @@ class CheckIn(BaseModel):
     preset: str | None = None
 
 
+# Called after every successful /api/check as await fn(result, preset_or_None); app.py uses it to tell the
+# table screen. A listener failure never fails the check.
+check_listeners: list[Callable[[dict[str, Any], dict[str, Any] | None], Awaitable[None]]] = []
+
+
 @router.post("/api/check")
-def api_check(body: CheckIn) -> Any:
+async def api_check(body: CheckIn) -> Any:
     sql = body.sql.strip()
     if body.db_id not in list_dbs():
         return JSONResponse({"error": f"unknown database: {body.db_id}"}, status_code=400)
     if not sql or len(sql) > MAX_SQL_CHARS:
         return JSONResponse({"error": f"SQL must be 1-{MAX_SQL_CHARS} characters"}, status_code=400)
-    return check(body.db_id, sql, body.preset)
+    out = await asyncio.to_thread(check, body.db_id, sql, body.preset)
+    p = _BY_ID.get(body.preset or "")
+    for fn in check_listeners:
+        try:
+            await fn(out, p if p and p["db_id"] == body.db_id else None)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 @router.get("/api/presets")

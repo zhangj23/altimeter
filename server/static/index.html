@@ -249,6 +249,14 @@ pre.sql mark.hl-join { background: var(--diff); border-bottom: 2px solid var(--c
 details.rewrite summary { font-size: var(--t0); font-weight: 600; cursor: pointer; padding: 2px 0; }
 details.rewrite[open] summary { margin-bottom: 8px; }
 .note { font-size: var(--t0); color: var(--ink-2); margin: 8px 0 0; }
+.intended { margin: 10px 0 0; max-width: 60ch; padding-left: 12px; border-left: 3px solid var(--rule); font-size: var(--t0); }
+.fixrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; }
+.copy {
+  padding: 8px 16px; border: 1.5px solid var(--ink); border-radius: 4px; background: transparent;
+  font-size: var(--t0); font-weight: 600; cursor: pointer;
+}
+.copy:active { transform: translateY(1px); }
+.copied { font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
 
 /* audit block inside an answer's boarding pass */
 .audit h2 { margin: 0 0 2px; font-size: var(--t1); font-weight: 600; color: var(--ask); }

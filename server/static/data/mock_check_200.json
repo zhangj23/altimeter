@@ -1,0 +1,173 @@
+{
+ "type": "check",
+ "job": {
+  "id": 0,
+  "db_id": "toxicology",
+  "question": "Atom, carbon and triple-bond counts for carcinogenic molecules with triple bonds."
+ },
+ "check": {
+  "db_id": "toxicology",
+  "sql": "WITH MoleculeStats AS (\n    SELECT\n        m.molecule_id,\n        m.label,\n        COUNT(DISTINCT a.atom_id) AS atom_count,\n        COUNT(DISTINCT b.bond_id) AS bond_count,\n        SUM(CASE WHEN a.element = 'c' THEN 1 ELSE 0 END) AS carbon_count,\n        SUM(CASE WHEN a.element = 'n' THEN 1 ELSE 0 END) AS nitrogen_count,\n        SUM(CASE WHEN b.bond_type = '#' THEN 1 ELSE 0 END) AS triple_bond_count\n    FROM\n        molecule m\n    LEFT JOIN\n        atom a ON m.molecule_id = a.molecule_id\n    LEFT JOIN\n        bond b ON m.molecule_id = b.molecule_id\n    GROUP BY\n        m.molecule_id, m.label\n),\nTripleBondedAtoms AS (\n    SELECT\n        c.atom_id,\n        c.atom_id2,\n        a1.element AS element1,\n        a2.element AS element2,\n        b.molecule_id\n    FROM\n        connected c\n    JOIN\n        bond b ON c.bond_id = b.bond_id\n    JOIN\n        atom a1 ON c.atom_id = a1.atom_id\n    JOIN\n        atom a2 ON c.atom_id2 = a2.atom_id\n    WHERE\n        b.bond_type = '#'\n)\nSELECT\n    ms.molecule_id,\n    ms.atom_count,\n    ms.bond_count,\n    ms.carbon_count,\n    ms.nitrogen_count,\n    ms.triple_bond_count,\n    (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND tba.element1 = 'n' AND tba.element2 = 'n') AS nitrogen_triple_bonds,\n    (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND (tba.element1 = 'c' OR tba.element2 = 'c')) AS carbon_containing_triple_bonds,\n    CASE\n        WHEN ms.triple_bond_count > 1 THEN 'Multiple Triple Bonds'\n        WHEN ms.triple_bond_count = 1 THEN 'Single Triple Bond'\n        ELSE 'No Triple Bonds'\n    END AS bond_category\nFROM\n    MoleculeStats ms\nWHERE\n    ms.label = '+'\n    AND ms.triple_bond_count > 0\nORDER BY\n    ms.triple_bond_count DESC,\n    ms.atom_count DESC;",
+  "parses": true,
+  "parse_error": null,
+  "audited": true,
+  "flagged": true,
+  "findings": [
+   {
+    "table": "atom",
+    "alias": "a",
+    "column": "CASE WHEN a.element = 'c' THEN 1 ELSE 0 END",
+    "aggregate": "SUM(CASE WHEN a.element = 'c' THEN 1 ELSE 0 END)",
+    "joined_rows": 346038,
+    "distinct_rows": 9111,
+    "factor": 37.98,
+    "many_to_many": true
+   },
+   {
+    "table": "atom",
+    "alias": "a",
+    "column": "CASE WHEN a.element = 'n' THEN 1 ELSE 0 END",
+    "aggregate": "SUM(CASE WHEN a.element = 'n' THEN 1 ELSE 0 END)",
+    "joined_rows": 346038,
+    "distinct_rows": 9111,
+    "factor": 37.98,
+    "many_to_many": true
+   },
+   {
+    "table": "bond",
+    "alias": "b",
+    "column": "CASE WHEN b.bond_type = '#' THEN 1 ELSE 0 END",
+    "aggregate": "SUM(CASE WHEN b.bond_type = '#' THEN 1 ELSE 0 END)",
+    "joined_rows": 346038,
+    "distinct_rows": 9156,
+    "factor": 37.794,
+    "many_to_many": true
+   }
+  ],
+  "message": "Fan-out: SUM(CASE WHEN a.element = 'c' THEN 1 ELSE 0 END) sees each atom row 37.98x (346038 joined rows vs 9111 distinct) because of the JOIN (many-to-many: no table appears once per joined row).",
+  "audit_error": null,
+  "explanation": "Each atom row is counted 38 times on average because the query also joins molecule and bond. Each bond row is counted 37.8 times on average because the query also joins molecule and atom.",
+  "highlights": [
+   {
+    "start": 181,
+    "end": 229,
+    "kind": "aggregate"
+   },
+   {
+    "start": 255,
+    "end": 303,
+    "kind": "aggregate"
+   },
+   {
+    "start": 331,
+    "end": 381,
+    "kind": "aggregate"
+   },
+   {
+    "start": 440,
+    "end": 492,
+    "kind": "join"
+   },
+   {
+    "start": 502,
+    "end": 554,
+    "kind": "join"
+   }
+  ],
+  "intended": "If you meant to add up every atom, molecule and bond combination, this is fine. If you meant to add up each atom row once, use the fix.",
+  "original": {
+   "columns": [
+    "molecule_id",
+    "atom_count",
+    "bond_count",
+    "carbon_count",
+    "nitrogen_count",
+    "triple_bond_count",
+    "nitrogen_triple_bonds",
+    "carbon_containing_triple_bonds",
+    "bond_category"
+   ],
+   "rows": [
+    [
+     "TR041",
+     14,
+     14,
+     112,
+     28,
+     28,
+     0,
+     4,
+     "Multiple Triple Bonds"
+    ],
+    [
+     "TR499",
+     4,
+     3,
+     0,
+     0,
+     4,
+     0,
+     0,
+     "Multiple Triple Bonds"
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0732,
+   "rows_capped": false
+  },
+  "corrected": {
+   "sql": "WITH MoleculeStats AS (\n    SELECT\n        m.molecule_id,\n        m.label,\n        COUNT(DISTINCT a.atom_id) AS atom_count,\n        COUNT(DISTINCT b.bond_id) AS bond_count,\n        COUNT(DISTINCT CASE WHEN a.element = 'c' THEN a.atom_id END) AS carbon_count,\n        COUNT(DISTINCT CASE WHEN a.element = 'n' THEN a.atom_id END) AS nitrogen_count,\n        COUNT(DISTINCT CASE WHEN b.bond_type = '#' THEN b.bond_id END) AS triple_bond_count\n    FROM\n        molecule m\n    LEFT JOIN\n        atom a ON m.molecule_id = a.molecule_id\n    LEFT JOIN\n        bond b ON m.molecule_id = b.molecule_id\n    GROUP BY\n        m.molecule_id, m.label\n),\nTripleBondedAtoms AS (\n    SELECT\n        c.atom_id,\n        c.atom_id2,\n        a1.element AS element1,\n        a2.element AS element2,\n        b.molecule_id\n    FROM\n        connected c\n    JOIN\n        bond b ON c.bond_id = b.bond_id\n    JOIN\n        atom a1 ON c.atom_id = a1.atom_id\n    JOIN\n        atom a2 ON c.atom_id2 = a2.atom_id\n    WHERE\n        b.bond_type = '#'\n)\nSELECT\n    ms.molecule_id,\n    ms.atom_count,\n    ms.bond_count,\n    ms.carbon_count,\n    ms.nitrogen_count,\n    ms.triple_bond_count,\n    (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND tba.element1 = 'n' AND tba.element2 = 'n') AS nitrogen_triple_bonds,\n    (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND (tba.element1 = 'c' OR tba.element2 = 'c')) AS carbon_containing_triple_bonds,\n    CASE\n        WHEN ms.triple_bond_count > 1 THEN 'Multiple Triple Bonds'\n        WHEN ms.triple_bond_count = 1 THEN 'Single Triple Bond'\n        ELSE 'No Triple Bonds'\n    END AS bond_category\nFROM\n    MoleculeStats ms\nWHERE\n    ms.label = '+'\n    AND ms.triple_bond_count > 0\nORDER BY\n    ms.triple_bond_count DESC,\n    ms.atom_count DESC;",
+   "source": "hand",
+   "columns": [
+    "molecule_id",
+    "atom_count",
+    "bond_count",
+    "carbon_count",
+    "nitrogen_count",
+    "triple_bond_count",
+    "nitrogen_triple_bonds",
+    "carbon_containing_triple_bonds",
+    "bond_category"
+   ],
+   "rows": [
+    [
+     "TR041",
+     14,
+     14,
+     8,
+     2,
+     2,
+     0,
+     4,
+     "Multiple Triple Bonds"
+    ],
+    [
+     "TR499",
+     4,
+     3,
+     0,
+     0,
+     1,
+     0,
+     0,
+     "Single Triple Bond"
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0808,
+   "rows_capped": false
+  },
+  "headline": {
+   "column": "carbon_count",
+   "row": "TR041",
+   "before": 112,
+   "after": 8,
+   "before_text": "112",
+   "after_text": "8",
+   "ratio": 14.0,
+   "ratio_text": "14",
+   "single_cell": false
+  },
+  "audit_seconds": 0.2761
+ }
+}

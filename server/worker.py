@@ -4,6 +4,11 @@ Opens no network sockets (HF_HUB_OFFLINE is set by altimeter.model; the only I/O
 ALTIMETER_FAKE=1 (or fake=True) skips the model and returns a canned SQL that is executed for real.
 ALTIMETER_READINGS=auto|always|off: two-readings sampling after the greedy answer (auto = only when the needle
 is missing or below readings.ASK_BELOW). Fake mode builds readings from two real queries.
+
+Pipe protocol (worker -> parent): {"type":"ready"} once after load + warm-up; per request, zero or more
+{"type":"stage","stage":"generating"|"scoring"|"executing"|"sampling"} and then the result dict (no "type").
+ALTIMETER_JOB_TIMEOUT (seconds, default 45): WorkerClient.ask kills and restarts a worker that takes longer.
+ALTIMETER_STALL_TEST=1: the question "stall test" hangs the worker (only for testing the timeout path).
 """
 from __future__ import annotations
 
@@ -22,6 +27,20 @@ MAX_ROWS = 200
 EXEC_TIMEOUT_S = 5.0
 FAKE_SQL = "SELECT name FROM sqlite_master WHERE type='table'"
 READINGS_N = int(os.environ.get("ALTIMETER_READINGS_N", "6"))
+WARMUP = [("california_schools", "How many schools are in Alameda County?"),
+          ("formula_1", "How many races were held in 2009?")]
+STALL_QUESTION = "stall test"
+
+
+class JobTimeout(RuntimeError):
+    pass
+
+
+def job_timeout_s() -> float:
+    try:
+        return float(os.environ.get("ALTIMETER_JOB_TIMEOUT", "45"))
+    except ValueError:
+        return 45.0
 
 
 def list_dbs() -> list[str]:
@@ -109,13 +128,16 @@ def _fake_samples(path: str) -> list[str]:
     return [a, a, b, a, b, "SELECT no_such_column FROM sqlite_master"]
 
 
-def _readings(model: Any, messages: list[dict[str, str]] | None, path: str, needle: float | None) -> dict[str, Any]:
+def _readings(model: Any, messages: list[dict[str, str]] | None, path: str, needle: float | None,
+              emit: Any = None) -> dict[str, Any]:
     """Sample + cluster after the greedy answer. Never raises: a failure here must not lose the answer."""
     from altimeter.readings import ASK_BELOW, choose_readings, cluster
 
     mode = _readings_mode()
     if mode == "off" or (mode == "auto" and needle is not None and needle >= ASK_BELOW):
         return {"readings": None, "readings_seconds": None, "readings_error": None}
+    if emit:
+        emit("sampling")
     t0 = time.time()
     try:
         if model is None:
@@ -137,10 +159,14 @@ def _readings(model: Any, messages: list[dict[str, str]] | None, path: str, need
                 "readings_error": f"{type(e).__name__}: {e}"}
 
 
-def _answer(model: Any, probe: Any, req: dict[str, Any]) -> dict[str, Any]:
+def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None) -> dict[str, Any]:
     from altimeter.prompting import build_messages
 
+    emit = emit or (lambda _stage: None)
     db_id, question = req["db_id"], req["question"]
+    emit("generating")
+    if os.environ.get("ALTIMETER_STALL_TEST") == "1" and question.strip().lower() == STALL_QUESTION:
+        time.sleep(3600)  # timeout test: the parent has to kill this process
     path = db_path(db_id)
     score = None
     messages = None
@@ -158,13 +184,41 @@ def _answer(model: Any, probe: Any, req: dict[str, Any]) -> dict[str, Any]:
             "logprob_mean": round(g.logprob_mean, 4),
             "logprob_min": round(g.logprob_min, 4),
         }
+        if probe is not None:
+            emit("scoring")
         score = _score(probe, g, question, path)  # before execution
         del g
+    emit("executing")
     result = execute(db_id, gen["sql"])  # greedy answer runs before any sampling
     needle = score["needle"] if score else None
     explain = score.pop("explain", None) if score else None
     return {"db_id": db_id, "question": question, **gen, "probe": score, "explain": explain, **result,
-            **_readings(model, messages, path, needle), "fake": model is None}
+            **_readings(model, messages, path, needle, emit), "fake": model is None}
+
+
+def _warm_up(model: Any, probe: Any) -> list[dict[str, Any]]:
+    """1-2 real generations on BIRD dbs, so the first judge's question does not pay the CUDA warm-up."""
+    from altimeter.prompting import build_messages
+
+    dbs = set(list_dbs())
+    picks = [w for w in WARMUP if w[0] in dbs] or [(d, "How many rows are in the first table?") for d in sorted(dbs)[:1]]
+    out = []
+    for db_id, q in picks[:2]:
+        t0 = time.time()
+        try:
+            path = db_path(db_id)
+            g = model.generate(build_messages(path, q))
+            _score(probe, g, q, path)
+            execute(db_id, g.sql)
+            del g
+            out.append({"db_id": db_id, "seconds": round(time.time() - t0, 2)})
+        except Exception as e:  # noqa: BLE001 - warm-up is best effort
+            out.append({"db_id": db_id, "error": f"{type(e).__name__}: {e}"})
+        finally:
+            import torch
+
+            torch.cuda.empty_cache()
+    return out
 
 
 def worker_main(conn: Connection, fake: bool) -> None:
@@ -177,7 +231,8 @@ def worker_main(conn: Connection, fake: bool) -> None:
             from altimeter.probe import Probe
 
             probe = Probe(str(PROBE_PATH))
-    conn.send({"type": "ready", "fake": fake, "probe": probe is not None})
+    warm = [] if model is None else _warm_up(model, probe)
+    conn.send({"type": "ready", "fake": fake, "probe": probe is not None, "warmup": warm})
     while True:
         try:
             req = conn.recv()
@@ -186,7 +241,7 @@ def worker_main(conn: Connection, fake: bool) -> None:
         if req is None:
             return
         try:
-            out = _answer(model, probe, req)
+            out = _answer(model, probe, req, lambda stage: conn.send({"type": "stage", "stage": stage}))
         except Exception as e:  # noqa: BLE001 - report any failure (e.g. CUDA OOM) to the client
             out = {"db_id": req.get("db_id"), "question": req.get("question"), "error": f"{type(e).__name__}: {e}",
                    "sql": None, "columns": None, "rows": None, "probe": None}
@@ -204,6 +259,8 @@ class WorkerClient:
     def __init__(self, fake: bool | None = None) -> None:
         self.fake = os.environ.get("ALTIMETER_FAKE") == "1" if fake is None else fake
         self.ready = False
+        self.ready_info: dict[str, Any] | None = None
+        self.restarts = 0
         self._start()
 
     def _start(self) -> None:
@@ -213,20 +270,44 @@ class WorkerClient:
         self.proc.start()
         child.close()
         self.ready = False
+        self.warm_started = time.time()
+
+    def restart(self) -> None:
+        """Kill the worker (stuck or crashed) and start a fresh one; it reloads and warms up again."""
+        if self.proc.is_alive():
+            self.proc.kill()
+        self.proc.join(timeout=10)
+        self.conn.close()
+        self.restarts += 1
+        self._start()
 
     def wait_ready(self) -> None:
         if not self.ready:
             msg = self.conn.recv()  # raises EOFError if the worker died while loading
+            self.ready_info = msg
             self.ready = msg.get("type") == "ready"
 
-    def ask(self, db_id: str, question: str) -> dict[str, Any]:
+    def ask(self, db_id: str, question: str, on_stage: Any = None, timeout_s: float | None = None) -> dict[str, Any]:
+        """Relays {"type":"stage"} messages to on_stage(stage) and returns the result. Waiting for the worker to
+        be ready does not count; past timeout_s (default ALTIMETER_JOB_TIMEOUT) the worker is restarted."""
+        timeout_s = job_timeout_s() if timeout_s is None else timeout_s
         try:
             self.wait_ready()
             self.conn.send({"db_id": db_id, "question": question})
-            return self.conn.recv()
+            deadline = time.monotonic() + timeout_s
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0 or not self.conn.poll(left):
+                    self.restart()
+                    raise JobTimeout(f"job exceeded {timeout_s:g} s; model worker restarted")
+                msg = self.conn.recv()
+                if isinstance(msg, dict) and msg.get("type") == "stage":
+                    if on_stage is not None:
+                        on_stage(msg["stage"])
+                    continue
+                return msg
         except (EOFError, BrokenPipeError, OSError) as e:
-            self.close()
-            self._start()  # worker crashed: restart it so the next question works
+            self.restart()  # worker crashed: restart it so the next question works
             raise RuntimeError(f"model worker crashed ({type(e).__name__}); restarting") from e
 
     def close(self) -> None:

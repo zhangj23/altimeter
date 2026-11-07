@@ -1,0 +1,84 @@
+{
+ "type": "check",
+ "job": {
+  "id": 0,
+  "db_id": "codebase_community",
+  "question": "For user No. 24, how many times is the number of posts compared to votes?"
+ },
+ "check": {
+  "db_id": "codebase_community",
+  "sql": "SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24",
+  "parses": true,
+  "parse_error": null,
+  "audited": true,
+  "flagged": true,
+  "findings": [
+   {
+    "table": "posts",
+    "alias": "T2",
+    "column": "T2.Id",
+    "aggregate": "COUNT(T2.Id)",
+    "joined_rows": 24,
+    "distinct_rows": 3,
+    "factor": 8.0,
+    "many_to_many": true
+   }
+  ],
+  "message": "Fan-out: COUNT(T2.Id) sees each posts row 8x (24 joined rows vs 3 distinct) because of the JOIN (many-to-many: no table appears once per joined row). Deduplicated value: 0.375.",
+  "audit_error": null,
+  "explanation": "Each posts row is counted 8 times because the query also joins votes.",
+  "highlights": [
+   {
+    "start": 12,
+    "end": 24,
+    "kind": "aggregate"
+   },
+   {
+    "start": 81,
+    "end": 127,
+    "kind": "join"
+   }
+  ],
+  "intended": "If you meant to count every posts and votes pair, this is fine. If you meant to count each posts row once, use the fix.",
+  "original": {
+   "columns": [
+    "CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)"
+   ],
+   "rows": [
+    [
+     3.0
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0248,
+   "rows_capped": false
+  },
+  "corrected": {
+   "sql": "SELECT CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24",
+   "source": "auditor",
+   "columns": [
+    "CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id)"
+   ],
+   "rows": [
+    [
+     0.375
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0497,
+   "rows_capped": false
+  },
+  "headline": {
+   "column": "CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)",
+   "row": null,
+   "before": 3.0,
+   "after": 0.375,
+   "before_text": "3.0",
+   "after_text": "0.375",
+   "ratio": 8.0,
+   "ratio_text": "8",
+   "single_cell": true
+  },
+  "audit_seconds": 0.1029
+ }
+}

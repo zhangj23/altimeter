@@ -368,7 +368,12 @@ function play(r, animate) {
   });
 }
 
+const STAGE = { generating: "Generating SQL", scoring: "Scoring it from the model's hidden states", executing: "Running the SQL on SQLite", sampling: "Sampling other readings" };
+let stageLabel = STAGE.generating;
+const drawClock = () => { $("status").textContent = `${stageLabel} · ${((performance.now() - workingSince) / 1000).toFixed(1)} s`; };
+
 function showWorking(job) {
+  setCheck(false); // a new Ask job ends the check reveal
   if (playing) return; // the queue line shows it; the replay finishes first
   clearTimers();
   setHow(false);
@@ -377,12 +382,417 @@ function showWorking(job) {
   renderHow(null);
   setGauge(null, "hold");
   workingSince = performance.now();
+  stageLabel = STAGE.generating;
   stopClock();
-  const draw = () => { $("status").textContent = `Generating SQL · ${((performance.now() - workingSince) / 1000).toFixed(1)} s`; };
-  draw();
-  clock = setInterval(draw, 100);
+  drawClock();
+  clock = setInterval(drawClock, 100);
+}
+function showStage(m) {
+  if (currentJob && m.job && m.job.id !== currentJob.id) return;
+  stageLabel = STAGE[m.stage] || String(m.stage);
+  if (!clock) return;
+  drawClock();
+  const pre = document.querySelector("#answer pre.sql");
+  if (pre && m.stage !== "generating") pre.textContent = "SQL written; it is shown here with its score";
 }
 function stopClock() { if (clock) clearInterval(clock); clock = null; }
+
+/* ---------- pre-flight check reveal ---------- */
+// Every number here comes from the /api/check payload (auditor counts, executed results).
+const CK = { before: 400, hl: 1300, strike: 2300, after: 3000, ratio: 3800, why: 4600 };
+const CALM = { value: 300, word: 900, why: 1500 };
+let checkTimers = [];
+let presets = []; // GET /api/presets: names the answer key a checked query came from
+fetch("api/presets").then((r) => r.json()).then((d) => { presets = d.presets || []; }).catch(() => {});
+let checkFit = null; // re-lays out the current check for the window size
+let checkMode = false;
+
+function setCheck(on) {
+  checkMode = on;
+  document.body.classList.toggle("check", on);
+  if (!on) { checkTimers.forEach(clearTimeout); checkTimers = []; }
+}
+const nfmt = (v) => (typeof v === "number" ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : String(v));
+const times = (f) => `${+Number(f).toPrecision(3)}×`;
+
+function ratioWords(h) { // [big, small]; before/after of the headline cell
+  const r = Number(h.ratio);
+  if (h.ratio == null || !Number.isFinite(r) || r <= 0 || r === 1) return null;
+  const hi = r > 1;
+  if (hi && r >= 2) return [times(r), "too high"];
+  if (!hi && r <= 0.5) return [times(1 / r), "too low"];
+  return [`${Math.round(Math.abs(r - 1) * 100)}%`, hi ? "too high" : "too low"];
+}
+
+// The query, trimmed to maxLines: every line a highlight touches (plus ctx lines around it), gaps marked.
+function codeView(sql, spans, maxLines, ctx = 1) {
+  const NL = String.fromCharCode(10);
+  const lines = sql.split(NL);
+  const starts = [];
+  let o = 0;
+  for (const ln of lines) { starts.push(o); o += ln.length + 1; }
+  const lineOf = (pos) => { let i = 0; while (i + 1 < starts.length && starts[i + 1] <= pos) i++; return i; };
+  let keep = lines.map((_, i) => i);
+  if (lines.length > maxLines) {
+    const want = new Set();
+    for (const sp of spans) {
+      for (let i = lineOf(sp.start) - ctx; i <= lineOf(Math.max(sp.start, sp.end - 1)) + ctx; i++) if (i >= 0 && i < lines.length) want.add(i);
+    }
+    keep = (want.size ? [...want].sort((x, y) => x - y) : keep).slice(0, maxLines);
+  }
+  const box = el("div", "sqlbox");
+  const base = el("pre", "base");
+  const hl = el("pre", "hl");
+  keep.forEach((i, k) => {
+    if (k && i > keep[k - 1] + 1) { base.append(el("span", "gap", "  ⋯" + NL)); hl.append(el("span", "gap", "  ⋯" + NL)); }
+    const lo = starts[i], hi = lo + lines[i].length;
+    const nl = k < keep.length - 1 ? NL : "";
+    base.append(lines[i] + nl);
+    let p = lo;
+    for (const sp of spans) {
+      const st = Math.max(sp.start, p), en = Math.min(sp.end, hi);
+      if (en <= st) continue;
+      if (st > p) hl.append(sql.slice(p, st));
+      hl.append(el("mark", sp.kind === "join" ? "join" : "agg", sql.slice(st, en)));
+      p = en;
+    }
+    hl.append(sql.slice(p, hi) + nl);
+  });
+  box.append(base, hl);
+  const contiguous = keep.length && keep[keep.length - 1] - keep[0] === keep.length - 1;
+  const range = keep.length === lines.length ? null
+    : contiguous ? `Lines ${keep[0] + 1}–${keep[keep.length - 1] + 1} of ${lines.length}` : `${keep.length} of ${lines.length} lines`;
+  return { box, hl, range };
+}
+
+function evidence(findings) {
+  const seen = new Set();
+  const t = el("table", "evid");
+  const hr = el("tr");
+  for (const [h, n] of [["Table", 0], ["Rows after the JOIN", 1], ["Distinct rows", 1], ["Each row counted", 1]]) hr.append(el("th", n ? "n" : null, h));
+  const th = el("thead");
+  th.append(hr);
+  const tb = el("tbody");
+  for (const f of findings) {
+    const key = `${f.table}|${f.joined_rows}|${f.distinct_rows}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tr = el("tr");
+    tr.append(el("td", null, f.table === "*" ? "every joined table" : f.table), el("td", "n", nfmt(f.joined_rows)),
+      el("td", "n", nfmt(f.distinct_rows)), el("td", "n", times(f.factor)));
+    tb.append(tr);
+  }
+  t.append(th, tb);
+  return t;
+}
+
+function singleValue(res) {
+  const r = res && res.rows;
+  if (!r || r.length !== 1 || r[0].length !== 1 || r[0][0] == null) return null;
+  const s = nfmt(r[0][0]);
+  return s.length <= 14 ? s : null;
+}
+
+function fitNumbers(reveal, chars) { // one font size that fits every big number on one line
+  const w = $("checkcol").clientWidth;
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const gaps = 3.4 * rem * Math.max(0, reveal.children.length - 1);
+  const px = (w - gaps) / (0.62 * Math.max(4, chars));
+  reveal.style.setProperty("--num", `${Math.max(3 * rem, Math.min(7.5 * rem, px)).toFixed(0)}px`);
+}
+
+function showCheck(m, animate) {
+  const c = m.check || {};
+  const job = m.job || {};
+  setCov(false);
+  setHow(false);
+  setCheck(true);
+  const col = $("checkcol");
+  col.replaceChildren();
+  const anim = animate && !reduced();
+  const at = (ms, fn) => { if (anim) checkTimers.push(setTimeout(fn, ms)); else fn(); };
+  const ph = (node, ms, cls = "ph") => { node.classList.add(...cls.split(" ")); at(ms, () => node.classList.add("on")); return node; };
+
+  const db = c.db_id || job.db_id || "";
+  const pre = presets.find((p) => p.db_id === db && (p.question === job.question || p.sql === c.sql));
+  const label = pre ? pre.label : "";
+  const bits = [db, label, c.audit_seconds != null ? `audited in ${fx(c.audit_seconds, 2)} s` : ""].filter(Boolean);
+  col.append(el("p", "route", bits.join(" · ")), el("h2", null, job.question || label || `SQL sent for a pre-flight check on ${db}`));
+
+  const h = c.headline;
+  const failed = c.parses === false || !!c.audit_error || c.message === "audit incomplete";
+  const flagged = !!c.flagged;
+  const reveal = el("div", "reveal");
+  const orig = c.original || {};
+  let chars = 0;
+
+  if (flagged && h) {
+    if (!h.single_cell) {
+      const cols = orig.columns || [];
+      col.append(el("p", "ck-cell", h.row != null && cols[0] ? `${h.column} where ${cols[0]} = ${h.row}` : String(h.column)));
+    }
+    const before = el("div", "rv before");
+    const bb = el("b");
+    bb.append(el("span", "txt", h.before_text), el("i", "strike"));
+    before.append(el("small", null, "As written"), bb);
+    const after = el("div", "rv");
+    after.append(el("small", null, "Deduplicated"), el("b", null, h.after_text));
+    reveal.append(ph(before, CK.before), ph(after, CK.after, "ph after"));
+    at(CK.strike, () => before.classList.add("struck"));
+    chars = h.before_text.length + h.after_text.length;
+    const rw = ratioWords(h);
+    if (rw) {
+      const ratio = el("div", "rv ratio");
+      const rb = el("b", null, rw[0].replace(/×$/, ""));
+      if (rw[0].endsWith("×")) rb.append(el("span", "x", "×"));
+      rb.append(el("span", "w", rw[1]));
+      ratio.append(rb);
+      reveal.append(ph(ratio, CK.ratio));
+      chars += rw[0].length + rw[1].length * 0.3;
+    }
+  } else {
+    const v = orig.error ? null : singleValue(orig);
+    if (v) {
+      const val = el("div", "rv");
+      val.append(el("small", null, flagged ? "As written, unverified" : "Result"), el("b", null, v));
+      reveal.append(ph(val, CALM.value));
+      chars = v.length;
+    }
+    const word = el("div", "rv okword");
+    const wb = el("b", null, flagged ? "Double counted" : failed ? "Audit incomplete" : "No double counting found");
+    wb.style.color = flagged ? "var(--ask)" : failed ? "var(--caution-ink)" : "";
+    word.append(wb);
+    reveal.append(ph(word, CALM.word));
+    chars = Math.max(chars + 8, 12);
+  }
+  col.append(reveal);
+  fitNumbers(reveal, chars);
+
+  const body = el("div", "ck-body");
+  const left = el("div");
+  const why = el("div", "why");
+  body.append(left, why);
+  col.append(body);
+
+  // why: verdict, plain-English explanation, the auditor's counts, where the corrected number came from
+  const whyT = flagged && h ? CK.why : CALM.why;
+  if (flagged) {
+    if (h) why.append(el("p", "vword", "Double counted"));
+    if (c.explanation) why.append(el("p", "expl", c.explanation));
+    if ((c.findings || []).length) why.append(evidence(c.findings));
+    const cor = c.corrected;
+    const tables = [...new Set((c.findings || []).map((f) => f.table).filter((t) => t !== "*"))].join(" and ");
+    let fix;
+    if (!cor) fix = "The auditor has no rewrite for this query, so the number as written stays unverified.";
+    else if (cor.error) fix = `The corrected query failed: ${cor.error}`;
+    else if (!h) fix = "The corrected query ran, but no single number changed in its first row.";
+    else if (cor.source === "hand") fix = "Deduplicated value from a hand-written fix for this answer key, checked against the raw tables.";
+    else fix = `Deduplicated value from the auditor's rewrite, which counts each ${tables || "joined"} row once.`;
+    why.append(el("p", "fixline", fix));
+    if (c.intended) why.append(el("p", "fixline", c.intended));
+  } else if (failed) {
+    why.append(el("p", "expl", c.parse_error ? `The SQL did not parse: ${c.parse_error}` : `The auditor could not finish: ${c.audit_error || c.message}`));
+  } else {
+    why.append(el("p", "expl", c.audited
+      ? "The auditor counted joined rows against distinct rows for every aggregate behind a JOIN. No row is counted twice."
+      : "No JOIN feeds an aggregate here, so no row can be counted twice."));
+    if (orig.error) why.append(el("p", "err", orig.error));
+    else if (orig.rows && orig.rows.length && !singleValue(orig)) why.append(resultTable(orig.columns, orig.rows));
+  }
+  for (const n of why.children) ph(n, whyT);
+
+  // left: the query, offending parts highlighted; trimmed to the lines that fit
+  const spans = flagged ? (c.highlights || []) : [];
+  const sql = c.sql || "";
+  const key = el("p", "hkey");
+  const range = el("span", "range");
+  if (spans.length) key.append(el("span", "agg", "aggregate that counts too much"), el("span", "join", "JOIN that repeats its rows"));
+  key.append(range);
+  ph(key, spans.length ? CK.hl : 0);
+  const cor = c.corrected;
+  const corHead = flagged && h && cor && cor.sql
+    ? (cor.source === "hand" ? "Corrected SQL (hand-written fix)" : "Corrected SQL (auditor's rewrite)") : null;
+  let hlOn = false, corOn = false, view = null, corNodes = [];
+  if (spans.length) at(CK.hl, () => { hlOn = true; if (view) view.hl.classList.add("on"); });
+  at(CK.why, () => { corOn = true; corNodes.forEach((x) => x.classList.add("on")); });
+
+  // Lay out the query and the why column for the space there is. Runs again once Poppins has loaded.
+  const fit = () => {
+    if (!col.contains(left)) return;
+    const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    let n = Math.max(4, Math.floor(left.clientHeight / (0.95 * 1.5 * fs)));
+    for (let ctx = 1; ; ) {
+      view = codeView(sql, spans, n, ctx);
+      range.textContent = view.range || "";
+      left.replaceChildren(view.box, key);
+      if (n <= 4 || left.scrollHeight <= left.clientHeight + 1) break;
+      if (ctx) ctx = 0; else n -= 1;
+    }
+    if (hlOn) view.hl.classList.add("on");
+    // the corrected query, when the original fits whole and there is room for a few lines of it
+    corNodes = [];
+    if (corHead && !view.range) {
+      const head = el("p", "corhead ph", corHead);
+      for (let m2 = 40; m2 >= 3; m2--) {
+        const v2 = codeView(cor.sql, [], m2);
+        v2.box.classList.add("ph");
+        head.textContent = corHead + (v2.range ? ` · ${v2.range}` : "");
+        left.replaceChildren(view.box, key, head, v2.box);
+        if (left.scrollHeight <= left.clientHeight + 1) { corNodes = [head, v2.box]; break; }
+      }
+      if (!corNodes.length) left.replaceChildren(view.box, key);
+      if (corOn) corNodes.forEach((x) => x.classList.add("on"));
+    }
+    // why column: step the type down until it fits (long explanations list several tables)
+    why.className = "why";
+    for (const lvl of ["t1", "t2", "t3"]) { // cumulative: t3 keeps the t1 and t2 reductions
+      if (why.scrollHeight <= why.clientHeight + 1) break;
+      why.classList.add(lvl);
+    }
+  };
+  checkFit = fit;
+  fit();
+  if (window.ResizeObserver) { // the space for the query changes with the window and with font loading
+    let lastH = left.clientHeight;
+    new ResizeObserver(() => { if (left.clientHeight !== lastH) { lastH = left.clientHeight; fit(); } }).observe(body);
+  }
+  if (document.fonts && document.fonts.status !== "loaded") document.fonts.ready.then(fit);
+}
+
+/* ---------- coverage: out-of-fold scores from data/risk.json, all numbers computed here ---------- */
+const MIN_K = 20; // the curve starts once this many questions are answered, so it isn't a few-question spike
+const SRC_NAME = { both: "BIRD and Spider", bird: "BIRD", spider: "Spider" };
+let risk = null;
+let riskErr = null;
+let covSrc = "both";
+let covOn = false;
+
+function loadRisk() {
+  if (risk || riskErr) return Promise.resolve();
+  return fetch("data/risk.json", { cache: "no-cache" })
+    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then((d) => { risk = d; })
+    .catch((e) => { riskErr = `No data/risk.json (${e.message}). Run scripts/export_risk.py.`; });
+}
+
+function setCov(on) {
+  covOn = on;
+  document.body.classList.toggle("cov", on);
+  $("covbtn").setAttribute("aria-pressed", String(on));
+  if (on) { setCheck(false); loadRisk().then(renderCov); }
+}
+
+const pct = (x) => `${Math.round(x * 100)}%`;
+const covRows = () => risk.rows.filter((r) => covSrc === "both" || r.src === covSrc);
+
+function renderCov() {
+  if (!covOn) return;
+  for (const b of document.querySelectorAll(".seg button")) b.setAttribute("aria-pressed", String(b.dataset.src === covSrc));
+  if (!risk) { $("ledger").replaceChildren(el("p", "noex", riskErr || "Loading")); return; }
+  const rows = covRows();
+  const t = Number($("thr").value);
+  const n = rows.length;
+  let k = 0, right = 0, all = 0;
+  for (const r of rows) { all += r.y; if (r.s >= t) { k++; right += r.y; } }
+  const b = bandOf(t);
+  $("thrval").textContent = t.toFixed(2);
+  $("thrband").textContent = b.name;
+  $("thrband").style.color = bandInk(b.key);
+  $("cvcarriage").style.transform = `translateX(${(t * 100).toFixed(2)}%)`;
+  const row = (lab, big, det, cls) => {
+    const d = el("div", "lrow" + (cls ? " " + cls : ""));
+    d.append(el("span", "lab", lab), el("span", "big", big), el("span", "det", det));
+    return d;
+  };
+  $("ledger").replaceChildren(
+    row("Answer locally", n ? pct(k / n) : "--", `${k} of ${n} questions`),
+    row("Accuracy on those", k ? pct(right / k) : "--", k ? `${right} right, ${k - right} wrong answers shipped` : "No question reaches this reading"),
+    row("Answering everything", n ? pct(all / n) : "--", `${all} of ${n} right`, "ref"));
+  $("covnote").textContent = `${risk.source_note}. Showing ${SRC_NAME[covSrc]}: ${n} questions. The curve starts at the ${MIN_K} highest-scored.`;
+  drawCurve(rows, t);
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs, text) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  return n;
+}
+let curvePts = [];
+let curveX = null;
+
+function drawCurve(rows, t) {
+  const svg = $("curve");
+  const W = svg.clientWidth, H = svg.clientHeight;
+  svg.replaceChildren();
+  if (!W || !H || !rows.length) return;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const m = { l: 3.6 * fs, r: 1.2 * fs, t: 4.4 * fs, b: 3.4 * fs };
+  const n = rows.length;
+  const sorted = rows.slice().sort((a, b) => b.s - a.s);
+  const pts = [];
+  let k = 0, right = 0;
+  sorted.forEach((r, i) => {
+    k++; right += r.y;
+    if ((i === n - 1 || sorted[i + 1].s !== r.s) && k >= MIN_K) pts.push({ s: r.s, c: k / n, a: right / k });
+  });
+  curvePts = pts;
+  const all = right / n;
+  const yMin = Math.max(0, Math.floor(Math.min(all, ...pts.map((p) => p.a)) * 10) / 10 - 0.1);
+  const X = (c) => m.l + c * (W - m.l - m.r);
+  const Y = (a) => m.t + (1 - (a - yMin) / (1 - yMin)) * (H - m.t - m.b);
+  curveX = (px) => (px - m.l) / (W - m.l - m.r);
+  const small = (0.78 * fs).toFixed(1);
+  const mid = (0.9 * fs).toFixed(1);
+
+  for (let a = Math.ceil(yMin * 10) / 10; a <= 1.0001; a += 0.1) {
+    svg.append(sv("line", { class: "grid-l", x1: m.l, x2: W - m.r, y1: Y(a), y2: Y(a) }));
+    svg.append(sv("text", { x: m.l - 0.5 * fs, y: Y(a) + 0.3 * fs, "text-anchor": "end", "font-size": small }, pct(a)));
+  }
+  for (const c of [0, 0.25, 0.5, 0.75, 1]) {
+    svg.append(sv("line", { class: "axis-l", x1: X(c), x2: X(c), y1: H - m.b, y2: H - m.b + 0.35 * fs }));
+    svg.append(sv("text", { x: X(c), y: H - m.b + 1.35 * fs, "text-anchor": c === 0 ? "start" : c === 1 ? "end" : "middle", "font-size": small }, pct(c)));
+  }
+  svg.append(sv("line", { class: "axis-l", x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b }));
+  svg.append(sv("text", { x: X(0.5), y: H - 0.35 * fs, "text-anchor": "middle", "font-size": mid }, "Share of questions answered locally"));
+  svg.append(sv("text", { x: m.l - 0.5 * fs, y: m.t - 3.3 * fs, "font-size": mid, class: "strong" }, "Accuracy on the questions answered locally"));
+
+  // answer-everything reference
+  svg.append(sv("line", { class: "base", x1: m.l, x2: W - m.r, y1: Y(all), y2: Y(all) }));
+  svg.append(sv("text", { x: W - m.r, y: Y(all) + 1.3 * fs, "text-anchor": "end", "font-size": small }, `Answering everything: ${pct(all)}`));
+
+  // band edges, at the coverage each edge gives
+  const covAt = (e) => rows.filter((r) => r.s >= e).length / n;
+  [[0.8, "var(--cruise)", "Cruise from 0.80", 2.25], [0.5, "var(--caution-ink)", "Ask below 0.50", 1.05]].forEach(([e, col, lab, dy]) => {
+    const x = X(covAt(e));
+    svg.append(sv("line", { class: "edge", x1: x, x2: x, y1: m.t - dy * fs + 0.3 * fs, y2: H - m.b, stroke: col }));
+    const right = x > W - m.r - 8 * fs;
+    svg.append(sv("text", { x: x + (right ? -0.4 : 0.4) * fs, y: m.t - dy * fs + 0.75 * fs, "text-anchor": right ? "end" : "start", "font-size": small }, lab));
+  });
+
+  if (pts.length) svg.append(sv("path", { class: "line", d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.c).toFixed(1)},${Y(p.a).toFixed(1)}`).join("") }));
+
+  // the slider's threshold
+  let kt = 0, rt = 0;
+  for (const r of rows) if (r.s >= t) { kt++; rt += r.y; }
+  if (kt) {
+    const x = X(kt / n), y = Y(rt / kt);
+    svg.append(sv("line", { class: "cur", x1: x, x2: x, y1: y, y2: H - m.b }));
+    svg.append(sv("circle", { class: "dot", cx: x, cy: y, r: 0.42 * fs }));
+  }
+}
+
+function curvePick(ev) {
+  if (!curveX || !curvePts.length) return;
+  const r = $("curve").getBoundingClientRect();
+  const c = curveX(ev.clientX - r.left);
+  let best = curvePts[0];
+  for (const p of curvePts) if (Math.abs(p.c - c) < Math.abs(best.c - c)) best = p;
+  $("thr").value = (Math.floor(best.s * 100) / 100).toFixed(2);
+  renderCov();
+}
 
 /* ---------- queue footer ---------- */
 function setQueue(current, queue) {
@@ -403,10 +813,13 @@ function onMessage(ev) {
     currentJob = m.current;
     setQueue(m.current, m.queue);
     if (m.last && m.last.type === "result") play(m.last, false);
+    if (m.last && m.last.type === "check" && !m.current) showCheck(m.last, false);
     if (m.current) showWorking(m.current);
     return;
   }
-  if (m.type === "queued") setQueue(currentJob, m.queue);
+  if (m.type === "check") showCheck(m, true);
+  else if (m.type === "stage") showStage(m);
+  else if (m.type === "queued") setQueue(currentJob, m.queue);
   else if (m.type === "working") { currentJob = m.job; setQueue(m.job, m.queue); showWorking(m.job); }
   else if (m.type === "result") {
     currentJob = null;
@@ -448,14 +861,67 @@ function setHow(on) {
   document.body.classList.toggle("how", on);
   $("howbtn").setAttribute("aria-pressed", String(on));
 }
-$("howbtn").addEventListener("click", () => setHow(!document.body.classList.contains("how")));
-document.addEventListener("keydown", (e) => { if (e.key === "h" && !e.ctrlKey && !e.metaKey && !e.altKey) setHow(!document.body.classList.contains("how")); });
+function toggleHow() {
+  if (checkMode || covOn) { setCheck(false); setCov(false); setHow(true); return; }
+  setHow(!document.body.classList.contains("how"));
+}
+$("howbtn").addEventListener("click", toggleHow);
+$("covbtn").addEventListener("click", () => setCov(!covOn));
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "h") toggleHow();
+  else if (e.key === "c") setCov(!covOn);
+});
+$("thr").addEventListener("input", renderCov);
+for (const b of document.querySelectorAll(".seg button")) b.addEventListener("click", () => { covSrc = b.dataset.src; renderCov(); });
+$("curve").addEventListener("pointerdown", (e) => { $("curve").setPointerCapture(e.pointerId); curvePick(e); });
+$("curve").addEventListener("pointermove", (e) => { if (e.buttons) curvePick(e); });
+let resizeT = null;
+addEventListener("resize", () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => { renderCov(); if (checkMode && checkFit) checkFit(); }, 150);
+});
 
 buildTape();
+(function buildCovTape() { // same geometry as the gauge tape
+  for (let i = 0; i <= 10; i++) {
+    const t = el("span");
+    t.style.left = `calc(${i * 10}% - ${i === 10 ? 1 : 0}px)`;
+    $("cvticks").append(t);
+  }
+  for (const b of BANDS) {
+    const w = (b.to - b.from) * 100 + "%";
+    const seg = el("span", "b-" + b.key);
+    seg.style.width = w;
+    $("cvbands").append(seg);
+    const name = el("span", null, b.name);
+    name.style.width = w;
+    $("cvnames").append(name);
+  }
+})();
 setGauge(null);
 setQueue(null, []);
 renderHow(null);
 $("excol").append(el("p", "noex", `Ask from a phone at ${location.host}. Each answer's score breakdown replays here.`));
 renderQuestion("", "No question yet").querySelector(".route").textContent = "";
-setHow(new URLSearchParams(location.search).get("how") === "1");
+const params = new URLSearchParams(location.search);
+setHow(params.get("how") === "1");
 connect();
+
+// Dev-only: ?mock=check (571), check200, check140, check89 replays a recorded /api/check response;
+// ?mock=coverage[&t=0.5][&src=bird]; ?mock=stage walks a fake job through the stage messages.
+const mock = params.get("mock") || "";
+if (mock.startsWith("check")) {
+  fetch(`data/mock_check_${mock.slice(5) || "571"}.json`).then((r) => r.json())
+    .then((m) => setTimeout(() => onMessage({ data: JSON.stringify(m) }), 400));
+} else if (mock === "coverage") {
+  if (params.get("t")) $("thr").value = params.get("t");
+  if (SRC_NAME[params.get("src")]) covSrc = params.get("src");
+  setCov(true);
+} else if (mock === "stage") {
+  const job = { id: -1, db_id: "codebase_community", question: "Mock job: stage messages" };
+  const send = (m, ms) => setTimeout(() => onMessage({ data: JSON.stringify({ ...m, job, queue: [] }) }), ms);
+  send({ type: "working" }, 400);
+  send({ type: "stage", stage: "scoring" }, 2000);
+  send({ type: "stage", stage: "executing" }, 3500);
+}

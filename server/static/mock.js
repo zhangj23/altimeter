@@ -2,7 +2,7 @@
 /* Dev-only fixture driver, loaded by app.js only when the URL has ?mock=1. Not a measured result:
    every number here is made up for layout screenshots, and each pass is labeled "mock fixture".
    ?mock=1                       control strip at the bottom of the page
-   ?mock=1&state=<name>          run one scenario on load, no strip (idle|awaiting|cruise|caution|ask|readings|audit)
+   ?mock=1&state=<name>          run one scenario on load, no strip (idle|warming|awaiting|stage|cruise|caution|ask|readings|audit)
    &choose=A|B                   with state=readings, tap that reading after it renders
    ?mock=1&state=check|check-flagged|check-clear   Check mode. Its fixtures are copies of real /api/check output
                                  (BIRD q571 and q89, captured from a local run); the probe numbers are still made up. */
@@ -35,7 +35,7 @@
   };
 
   const params = new URLSearchParams(location.search);
-  const FX = {"presets":[{"id":"bird571","db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","label":"BIRD dev answer key, question 571 (2024 release)","question":"For user No. 24, how many times is the number of posts compared to votes?","has_fix":false},{"id":"bird89","db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","label":"BIRD dev answer key, question 89 (2024 release)","question":"How many accounts in East Bohemia chose statement issuance after each transaction?","has_fix":false}],"bird571":{"db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","parses":true,"parse_error":null,"audited":true,"flagged":true,"findings":[{"table":"posts","alias":"T2","column":"T2.Id","aggregate":"COUNT(T2.Id)","joined_rows":24,"distinct_rows":3,"factor":8.0,"many_to_many":true}],"message":"Fan-out: COUNT(T2.Id) sees each posts row 8x (24 joined rows vs 3 distinct) because of the JOIN (many-to-many: no table appears once per joined row). Deduplicated value: 0.375.","audit_error":null,"explanation":"Each posts row is counted 8 times because the query also joins votes.","highlights":[{"start":12,"end":24,"kind":"aggregate"},{"start":81,"end":127,"kind":"join"}],"original":{"columns":["CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[3.0]],"error":null,"seconds":0.0568,"rows_capped":false},"corrected":{"sql":"SELECT CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","source":"auditor","columns":["CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[0.375]],"error":null,"seconds":0.0541,"rows_capped":false},"headline":{"column":"CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)","row":null,"before":3.0,"after":0.375,"before_text":"3.0","after_text":"0.375","ratio":8.0,"ratio_text":"8","single_cell":true},"audit_seconds":0.1456},"bird89":{"db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","parses":true,"parse_error":null,"audited":true,"flagged":false,"findings":[],"message":"no fan-out detected","audit_error":null,"explanation":"","highlights":[],"original":{"columns":["COUNT(T2.account_id)"],"rows":[[13]],"error":null,"seconds":0.0007,"rows_capped":false},"corrected":null,"headline":null,"audit_seconds":0.0039}};
+  const FX = {"presets":[{"id":"bird571","db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","label":"BIRD dev answer key, question 571 (2024 release)","question":"For user No. 24, how many times is the number of posts compared to votes?","has_fix":false},{"id":"bird89","db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","label":"BIRD dev answer key, question 89 (2024 release)","question":"How many accounts in East Bohemia chose statement issuance after each transaction?","has_fix":false}],"bird571":{"db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","parses":true,"parse_error":null,"audited":true,"flagged":true,"findings":[{"table":"posts","alias":"T2","column":"T2.Id","aggregate":"COUNT(T2.Id)","joined_rows":24,"distinct_rows":3,"factor":8.0,"many_to_many":true}],"message":"Fan-out: COUNT(T2.Id) sees each posts row 8x (24 joined rows vs 3 distinct) because of the JOIN (many-to-many: no table appears once per joined row). Deduplicated value: 0.375.","audit_error":null,"explanation":"Each posts row is counted 8 times because the query also joins votes.","intended":"If you meant to count every posts and votes pair, this is fine. If you meant to count each posts row once, use the fix.","highlights":[{"start":12,"end":24,"kind":"aggregate"},{"start":81,"end":127,"kind":"join"}],"original":{"columns":["CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[3.0]],"error":null,"seconds":0.0568,"rows_capped":false},"corrected":{"sql":"SELECT CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","source":"auditor","columns":["CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[0.375]],"error":null,"seconds":0.0541,"rows_capped":false},"headline":{"column":"CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)","row":null,"before":3.0,"after":0.375,"before_text":"3.0","after_text":"0.375","ratio":8.0,"ratio_text":"8","single_cell":true},"audit_seconds":0.1456},"bird89":{"db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","parses":true,"parse_error":null,"audited":true,"flagged":false,"findings":[],"message":"no fan-out detected","audit_error":null,"explanation":"","highlights":[],"original":{"columns":["COUNT(T2.account_id)"],"rows":[[13]],"error":null,"seconds":0.0007,"rows_capped":false},"corrected":null,"headline":null,"audit_seconds":0.0039}};
   apiCall = async (url, body) => {
     await new Promise((r) => setTimeout(r, 400));
     if (url === "/api/presets") return { ok: true, status: 200, data: { presets: FX.presets } };
@@ -44,16 +44,25 @@
   };
   const send = (msg, ms) => setTimeout(() => onMessage({ data: JSON.stringify(msg) }), ms);
   let scenario = "cruise";
+  let jobId = 100;
+  const status = (warm) => ({ type: "status", ready: !warm, warming: warm, warm_seconds: warm ? 14 : null, queue: 0, fake: false, probe: !warm, restarts: 0 });
 
   // Stand-in socket: replies with the same message sequence the gateway sends.
   ws = {
     readyState: WebSocket.OPEN,
     send() {
-      send({ type: "queued", position: 1 }, 60);
-      send({ type: "working" }, 160);
-      if (scenario !== "awaiting") send({ type: "result", ...S[scenario] }, 1500);
+      const job_id = ++jobId;
+      send({ type: "queued", job_id, position: 1 }, 60);
+      send({ type: "working", job_id, elapsed: 0 }, 160);
+      send({ type: "stage", job_id, stage: "generating", elapsed: 0 }, 170);
+      if (scenario === "awaiting") return;
+      send({ type: "stage", job_id, stage: "scoring", elapsed: 1.0 }, 1150);
+      if (scenario === "stage") return; // hold mid-job for screenshots
+      send({ type: "stage", job_id, stage: "executing", elapsed: 1.2 }, 1350);
+      send({ type: "result", job_id, ...S[scenario] }, 1500);
     },
   };
+  onMessage({ data: JSON.stringify(status(params.get("state") === "warming")) });
   {
     const a = FX.bird571;
     Object.assign(S.audit, { sql: a.sql, columns: a.original.columns, rows: a.original.rows,
@@ -66,6 +75,7 @@
   function run(name) {
     if (pending) return;
     if (name === "idle") { if (params.get("state") !== "idle") location.search = "?mock=1"; return; }
+    if (name === "warming") { if (params.get("state") !== "warming") location.search = "?mock=1&state=warming"; return; }
     if (name.startsWith("check")) {
       setMode("check");
       const id = { "check-flagged": "bird571", "check-clear": "bird89" }[name];
@@ -77,6 +87,7 @@
     }
     setMode("ask");
     scenario = name;
+    if (name === "stage") name = "caution"; // holds at "Scoring confidence"
     $("db").value = S[name] && S[name].db_id ? S[name].db_id : DB;
     $("question").value = (S[name] || S.ask).question;
     $("form").requestSubmit();
@@ -97,7 +108,7 @@
 
   const strip = document.createElement("div");
   strip.setAttribute("style", "margin-top:28px;padding-top:10px;border-top:1px dashed var(--rule);display:flex;flex-wrap:wrap;gap:8px;font-size:var(--t0)");
-  for (const name of ["idle", "awaiting", "cruise", "caution", "ask", "readings", "audit", "check", "check-flagged", "check-clear"]) {
+  for (const name of ["idle", "warming", "awaiting", "stage", "cruise", "caution", "ask", "readings", "audit", "check", "check-flagged", "check-clear"]) {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = name;

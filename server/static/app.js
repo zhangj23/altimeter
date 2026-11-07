@@ -23,8 +23,29 @@ const el = (tag, cls, text) => {
 let ws = null;
 let retryMs = 500;
 let retryTimer = null;
-let pending = null; // {question, db_id, t0, phase}
+let pending = null; // {question, db_id, t0, phase: sent|queued|working|offline, stage, job_id, queueText}
 let tick = null;
+let serverStatus = null; // last {type:"status"} from the gateway
+let warmT0 = null; // performance.now() when the model started warming
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+};
+function randomId() {
+  const a = new Uint8Array(12);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+// Stable per phone, so the laptop can hand back a question's answer after the socket drops.
+const CLIENT = (() => {
+  const saved = store.get("altimeter.client");
+  if (saved && /^[A-Za-z0-9_-]{8,64}$/.test(saved)) return saved;
+  const id = randomId();
+  store.set("altimeter.client", id);
+  return id;
+})();
+let lastJob = Number(store.get("altimeter.lastJob")) || null; // last result this phone rendered
 
 /* ---------- instrument ---------- */
 function buildTape() {
@@ -95,22 +116,37 @@ function setGauge(score, mode) {
 function setStatus(text) { $("status").textContent = text; }
 function announce(text) { $("announce").textContent = text; }
 
+const STAGES = { generating: "Generating SQL", scoring: "Scoring confidence", executing: "Running the query", sampling: "Sampling other readings" };
+const warming = () => !!(serverStatus && serverStatus.warming);
+const warmSecs = () => (warmT0 == null ? 0 : Math.round((performance.now() - warmT0) / 1000));
+
+/* The status line while something is in progress, or null when nothing is (leave the last message). */
+function liveText() {
+  if (pending) {
+    if (pending.phase === "offline") return "Link lost. The laptop keeps your question; reconnecting.";
+    if (pending.phase === "working") return `${STAGES[pending.stage] || STAGES.generating} · ${((performance.now() - pending.t0) / 1000).toFixed(1)} s`;
+    if (warming()) return `Waiting for the model to warm up · ${warmSecs()} s`;
+    return pending.queueText || "Sent";
+  }
+  if (warming()) return `Warming up the model · ${warmSecs()} s`;
+  return null;
+}
+function refresh() {
+  const t = liveText();
+  if (t == null) return stopClock();
+  setStatus(t);
+}
 function startClock() {
-  stopClock();
-  const draw = () => {
-    if (!pending) return stopClock();
-    const s = ((performance.now() - pending.t0) / 1000).toFixed(1);
-    setStatus(`Generating SQL · ${s} s`);
-  };
-  draw();
-  tick = setInterval(draw, 100);
+  if (!tick) tick = setInterval(refresh, 100);
+  refresh();
 }
 function stopClock() { if (tick) clearInterval(tick); tick = null; }
 
-function busy(on) {
-  $("ask").disabled = on;
-  $("ask").textContent = on ? "Asking" : "Ask";
+function syncAsk() {
+  $("ask").disabled = !!pending || warming();
+  $("ask").textContent = pending ? "Asking" : "Ask";
 }
+function busy() { syncAsk(); }
 
 /* ---------- boarding pass ---------- */
 function fmtSeconds(x) {
@@ -301,23 +337,58 @@ function needleOf(r) {
 function onMessage(ev) {
   let m;
   try { m = JSON.parse(ev.data); } catch { return; }
-  if (m.type === "queued") {
-    if (pending) {
-      pending.phase = "queued";
-      const text = m.position <= 1 ? "Next in line" : `Queued · ${m.position - 1} ahead`;
-      setStatus(text);
-      announce(text);
-    }
-  } else if (m.type === "working") {
-    if (pending) {
-      pending.phase = "working";
-      pending.t0 = performance.now();
+  if (m.type === "status") {
+    const was = warming();
+    serverStatus = m;
+    if (m.warming) warmT0 = performance.now() - (m.warm_seconds || 0) * 1000;
+    else warmT0 = null;
+    syncAsk();
+    if (m.warming || pending) startClock();
+    else if (was) { setStatus("Model ready"); announce("Model ready."); }
+  } else if (m.type === "welcome") {
+    if (pending && m.job_id == null && !m.replay) {
+      // The laptop has no record of it (restarted, or the question waited too long without this phone).
+      pending = null;
+      stopClock();
+      syncAsk();
+      setGauge(null);
+      setStatus("The laptop lost this question. Ask again.");
+      announce("Question lost. Ask again.");
+    } else if (pending && m.job_id != null) {
+      pending.phase = "sent";
+      pending.job_id = m.job_id;
+    } else if (!pending && m.job_id != null) {
+      // Page reloaded while a question was in flight: pick it back up.
+      pending = { question: "", db_id: "", t0: performance.now(), phase: "sent", job_id: m.job_id };
+      syncAsk();
       setGauge(null, "hold");
       startClock();
-      announce("Awaiting probe.");
+    }
+  } else if (m.type === "queued") {
+    if (pending) {
+      pending.phase = "queued";
+      pending.job_id = m.job_id;
+      pending.queueText = m.position <= 1 ? "Next in line" : `Queued · ${m.position - 1} ahead`;
+      startClock();
+      announce(pending.queueText);
+    }
+  } else if (m.type === "working" || m.type === "stage") {
+    if (pending) {
+      const fresh = pending.phase !== "working";
+      pending.phase = "working";
+      pending.job_id = m.job_id;
+      if (m.type === "stage") pending.stage = m.stage;
+      if (fresh) {
+        pending.t0 = performance.now() - (m.elapsed || 0) * 1000;
+        setGauge(null, "hold");
+        announce("Awaiting probe.");
+      }
+      startClock();
     }
   } else if (m.type === "result") {
-    const secs = pending ? ((performance.now() - pending.t0) / 1000).toFixed(1) : null;
+    if (m.job_id != null && m.job_id === lastJob) return; // already rendered (replay after a reconnect)
+    if (m.job_id != null) { lastJob = m.job_id; store.set("altimeter.lastJob", String(m.job_id)); }
+    const secs = pending && pending.phase === "working" ? ((performance.now() - pending.t0) / 1000).toFixed(1) : null;
     pending = null;
     stopClock();
     busy(false);
@@ -331,6 +402,11 @@ function onMessage(ev) {
     if (Array.isArray(m.readings) && m.readings.length >= 2) say += " Two readings, choose one.";
     announce(say);
   } else if (m.type === "error") {
+    if (m.job_id != null) {
+      if (m.job_id === lastJob) return;
+      lastJob = m.job_id;
+      store.set("altimeter.lastJob", String(m.job_id));
+    }
     pending = null;
     stopClock();
     busy(false);
@@ -351,17 +427,20 @@ function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onopen = () => { retryMs = 500; setLink(true); };
-  ws.onmessage = onMessage;
-  ws.onclose = () => {
+  const sock = ws;
+  sock.onopen = () => {
+    retryMs = 500;
+    setLink(true);
+    sock.send(JSON.stringify({ type: "hello", client: CLIENT, last_job: lastJob }));
+  };
+  sock.onmessage = onMessage;
+  sock.onclose = () => {
+    if (sock !== ws) return;
     setLink(false);
     if (pending) {
-      pending = null;
-      stopClock();
-      busy(false);
-      setGauge(null);
-      setStatus("Connection dropped before the answer arrived. Ask again.");
-      announce("Connection dropped.");
+      pending.phase = "offline"; // the laptop keeps the job; hello on reconnect brings back its state
+      startClock();
+      announce("Link lost. Reconnecting.");
     }
     retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 4000);
@@ -423,13 +502,71 @@ function rewriteBlock(c) {
   return det;
 }
 
+/* Copy the corrected SQL. Plain http on the router has no async clipboard, so fall back to execCommand,
+   and if that fails too, open the rewrite and select its SQL for the phone's own Copy menu. */
+function copyFixButton(c, det) {
+  const row = el("div", "fixrow");
+  const btn = el("button", "copy", "Copy fixed SQL");
+  btn.type = "button";
+  const said = el("span", "copied");
+  said.setAttribute("aria-live", "polite");
+  const done = (text) => {
+    said.textContent = text;
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => { said.textContent = ""; }, 2500);
+  };
+  const selectIt = () => {
+    det.open = true;
+    const pre = det.querySelector("pre");
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    pre.scrollIntoView({ block: "nearest" });
+    done("Selected. Use your Copy menu.");
+  };
+  const legacy = () => {
+    const ta = el("textarea");
+    ta.value = c.sql;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  };
+  btn.addEventListener("click", () => {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(c.sql).then(() => done("Copied"), () => (legacy() ? done("Copied") : selectIt()));
+    } else if (legacy()) done("Copied");
+    else selectIt();
+  });
+  row.append(btn, said);
+  return row;
+}
+
+/* Explanation, "was this intended?" note, copy button. Returns [nodes, rewrite <details> or null]. */
+function fixParts(a) {
+  const nodes = [el("p", "explain", a.explanation || a.message)];
+  if (a.intended) nodes.push(el("p", "intended", a.intended));
+  const c = a.corrected;
+  const det = c ? rewriteBlock(c) : null;
+  if (c && !c.error) nodes.push(copyFixButton(c, det));
+  return [nodes, det];
+}
+
 /* Audit block inside an Ask answer (only when flagged). */
 function renderAudit(a) {
   const sec = el("section", "perf audit");
   sec.append(el("h2", null, "Double counting"));
   if (a.headline && a.corrected) sec.append(ledger(a.headline, a.corrected.source));
-  sec.append(el("p", "explain", a.explanation || a.message));
-  if (a.corrected) sec.append(rewriteBlock(a.corrected));
+  const [nodes, det] = fixParts(a);
+  sec.append(...nodes);
+  if (det) sec.append(det);
   else sec.append(el("p", "note", "No automatic rewrite for this query shape."));
   return sec;
 }
@@ -458,7 +595,12 @@ function renderCheck(d) {
   vh.append(el("h3", null, title), el("p", null, sub));
   top.append(vh);
   if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline, d.corrected.source));
-  if (d.flagged) top.append(el("p", "explain", d.explanation || d.message));
+  let det = null;
+  if (d.flagged) {
+    const [nodes, rw] = fixParts(d);
+    top.append(...nodes);
+    det = rw;
+  }
   sheet.append(top);
 
   const items = [];
@@ -490,7 +632,7 @@ function renderCheck(d) {
     if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
     body.append(el("p", "count", rowCount(o.rows.length, o.rows_capped, 5)));
   }
-  if (d.flagged && d.corrected) body.append(rewriteBlock(d.corrected));
+  if (det) body.append(det);
   sheet.append(body);
   $("checkOut").replaceChildren(sheet);
 }
@@ -604,7 +746,7 @@ function submit(e) {
   e.preventDefault();
   const question = $("question").value.trim();
   const db_id = $("db").value;
-  if (!question || !db_id || pending) return;
+  if (!question || !db_id || pending || warming()) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop yet."); connect(); return; }
   try { localStorage.setItem("altimeter.db", db_id); } catch { /* storage unavailable */ }
   pending = { question, db_id, t0: performance.now(), phase: "sent" };

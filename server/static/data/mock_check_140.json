@@ -1,0 +1,139 @@
+{
+ "type": "check",
+ "job": {
+  "id": 0,
+  "db_id": "financial",
+  "question": "Financial profile of all accounts in the Pisek district: deposits, withdrawals, cards, loans."
+ },
+ "check": {
+  "db_id": "financial",
+  "sql": "WITH PisekAccounts AS (\n    SELECT\n        a.account_id,\n        a.district_id,\n        a.frequency,\n        a.date,\n        d.A2 AS district_name\n    FROM account AS a\n    INNER JOIN district AS d ON a.district_id = d.district_id\n    WHERE d.A2 = 'Pisek'\n),\nAccountStats AS (\n    SELECT\n        pa.account_id,\n        COUNT(DISTINCT t.trans_id) AS transaction_count,\n        SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END) AS total_deposits,\n        SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END) AS total_withdrawals,\n        MAX(t.balance) AS max_balance,\n        COUNT(DISTINCT c.card_id) AS card_count\n    FROM PisekAccounts pa\n    LEFT JOIN trans t ON pa.account_id = t.account_id\n    LEFT JOIN disp d ON pa.account_id = d.account_id\n    LEFT JOIN card c ON d.disp_id = c.disp_id\n    GROUP BY pa.account_id\n),\nLoanInfo AS (\n    SELECT\n        pa.account_id,\n        COUNT(l.loan_id) AS loan_count,\n        SUM(l.amount) AS total_loan_amount,\n        SUM(CASE WHEN l.status = 'A' THEN l.amount ELSE 0 END) AS active_loan_amount,\n        AVG(l.duration) AS avg_loan_duration\n    FROM PisekAccounts pa\n    LEFT JOIN loan l ON pa.account_id = l.account_id\n    GROUP BY pa.account_id\n)\nSELECT\n    COUNT(pa.account_id) AS total_pisek_accounts,\n    AVG(ast.transaction_count) AS avg_transactions_per_account,\n    SUM(ast.total_deposits) AS total_deposits_all_accounts,\n    SUM(ast.total_withdrawals) AS total_withdrawals_all_accounts,\n    AVG(ast.max_balance) AS avg_max_balance,\n    SUM(ast.card_count) AS total_cards_issued,\n    SUM(li.loan_count) AS total_loans_issued,\n    SUM(li.active_loan_amount) / CASE WHEN SUM(li.total_loan_amount) = 0 THEN 1 ELSE SUM(li.total_loan_amount) END * 100 AS percent_active_loans,\n    (SELECT COUNT(DISTINCT c.client_id)\n     FROM PisekAccounts pa\n     JOIN disp d ON pa.account_id = d.account_id\n     JOIN client c ON d.client_id = c.client_id\n     WHERE d.type = 'OWNER') AS unique_account_owners\nFROM PisekAccounts pa\nLEFT JOIN AccountStats ast ON pa.account_id = ast.account_id\nLEFT JOIN LoanInfo li ON pa.account_id = li.account_id;",
+  "parses": true,
+  "parse_error": null,
+  "audited": true,
+  "flagged": true,
+  "findings": [
+   {
+    "table": "trans",
+    "alias": "t",
+    "column": "CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END",
+    "aggregate": "SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END)",
+    "joined_rows": 10641,
+    "distinct_rows": 9115,
+    "factor": 1.167
+   },
+   {
+    "table": "trans",
+    "alias": "t",
+    "column": "CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END",
+    "aggregate": "SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END)",
+    "joined_rows": 10641,
+    "distinct_rows": 9115,
+    "factor": 1.167
+   }
+  ],
+  "message": "Fan-out: SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END) sees each trans row 1.167x (10641 joined rows vs 9115 distinct) because of the JOIN.",
+  "audit_error": null,
+  "explanation": "Each trans row is counted 1.17 times on average because the query also joins PisekAccounts, disp and card.",
+  "highlights": [
+   {
+    "start": 376,
+    "end": 433,
+    "kind": "aggregate"
+   },
+   {
+    "start": 461,
+    "end": 517,
+    "kind": "aggregate"
+   },
+   {
+    "start": 662,
+    "end": 706,
+    "kind": "join"
+   },
+   {
+    "start": 716,
+    "end": 759,
+    "kind": "join"
+   },
+   {
+    "start": 769,
+    "end": 805,
+    "kind": "join"
+   }
+  ],
+  "intended": "If you meant to add up every trans, PisekAccounts, disp and card combination, this is fine. If you meant to add up each trans row once, use the fix.",
+  "original": {
+   "columns": [
+    "total_pisek_accounts",
+    "avg_transactions_per_account",
+    "total_deposits_all_accounts",
+    "total_withdrawals_all_accounts",
+    "avg_max_balance",
+    "total_cards_issued",
+    "total_loans_issued",
+    "percent_active_loans",
+    "unique_account_owners"
+   ],
+   "rows": [
+    [
+     46,
+     198.15217391304347,
+     36200426,
+     32012787,
+     75461.08695652174,
+     16,
+     3,
+     0,
+     46
+    ]
+   ],
+   "error": null,
+   "seconds": 0.6146,
+   "rows_capped": false
+  },
+  "corrected": {
+   "sql": "WITH PisekAccounts AS (\n    SELECT\n        a.account_id,\n        a.district_id,\n        a.frequency,\n        a.date,\n        d.A2 AS district_name\n    FROM account AS a\n    INNER JOIN district AS d ON a.district_id = d.district_id\n    WHERE d.A2 = 'Pisek'\n),\nAccountStats AS (\n    SELECT\n        pa.account_id,\n        COALESCE(MAX(t.transaction_count), 0) AS transaction_count,\n        COALESCE(MAX(t.total_deposits), 0) AS total_deposits,\n        COALESCE(MAX(t.total_withdrawals), 0) AS total_withdrawals,\n        MAX(t.max_balance) AS max_balance,\n        COUNT(DISTINCT c.card_id) AS card_count\n    FROM PisekAccounts pa\n    LEFT JOIN (\n        SELECT account_id,\n            COUNT(trans_id) AS transaction_count,\n            SUM(CASE WHEN type = 'PRIJEM' THEN amount ELSE 0 END) AS total_deposits,\n            SUM(CASE WHEN type = 'VYDAJ' THEN amount ELSE 0 END) AS total_withdrawals,\n            MAX(balance) AS max_balance\n        FROM trans\n        WHERE account_id IN (SELECT account_id FROM PisekAccounts)\n        GROUP BY account_id\n    ) t ON pa.account_id = t.account_id\n    LEFT JOIN disp d ON pa.account_id = d.account_id\n    LEFT JOIN card c ON d.disp_id = c.disp_id\n    GROUP BY pa.account_id\n),\nLoanInfo AS (\n    SELECT\n        pa.account_id,\n        COUNT(l.loan_id) AS loan_count,\n        SUM(l.amount) AS total_loan_amount,\n        SUM(CASE WHEN l.status = 'A' THEN l.amount ELSE 0 END) AS active_loan_amount,\n        AVG(l.duration) AS avg_loan_duration\n    FROM PisekAccounts pa\n    LEFT JOIN loan l ON pa.account_id = l.account_id\n    GROUP BY pa.account_id\n)\nSELECT\n    COUNT(pa.account_id) AS total_pisek_accounts,\n    AVG(ast.transaction_count) AS avg_transactions_per_account,\n    SUM(ast.total_deposits) AS total_deposits_all_accounts,\n    SUM(ast.total_withdrawals) AS total_withdrawals_all_accounts,\n    AVG(ast.max_balance) AS avg_max_balance,\n    SUM(ast.card_count) AS total_cards_issued,\n    SUM(li.loan_count) AS total_loans_issued,\n    SUM(li.active_loan_amount) / CASE WHEN SUM(li.total_loan_amount) = 0 THEN 1 ELSE SUM(li.total_loan_amount) END * 100 AS percent_active_loans,\n    (SELECT COUNT(DISTINCT c.client_id)\n     FROM PisekAccounts pa\n     JOIN disp d ON pa.account_id = d.account_id\n     JOIN client c ON d.client_id = c.client_id\n     WHERE d.type = 'OWNER') AS unique_account_owners\nFROM PisekAccounts pa\nLEFT JOIN AccountStats ast ON pa.account_id = ast.account_id\nLEFT JOIN LoanInfo li ON pa.account_id = li.account_id;",
+   "source": "hand",
+   "columns": [
+    "total_pisek_accounts",
+    "avg_transactions_per_account",
+    "total_deposits_all_accounts",
+    "total_withdrawals_all_accounts",
+    "avg_max_balance",
+    "total_cards_issued",
+    "total_loans_issued",
+    "percent_active_loans",
+    "unique_account_owners"
+   ],
+   "rows": [
+    [
+     46,
+     198.15217391304347,
+     31522862,
+     27931632,
+     75461.08695652174,
+     16,
+     3,
+     0,
+     46
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0852,
+   "rows_capped": false
+  },
+  "headline": {
+   "column": "total_deposits_all_accounts",
+   "row": null,
+   "before": 36200426,
+   "after": 31522862,
+   "before_text": "36,200,426",
+   "after_text": "31,522,862",
+   "ratio": 1.148,
+   "ratio_text": "1.15",
+   "single_cell": false
+  },
+  "audit_seconds": 1.2837
+ }
+}

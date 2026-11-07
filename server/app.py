@@ -1,8 +1,29 @@
-"""Gateway: static phone UI, GET /api/dbs, one WebSocket /ws. A single queue consumer feeds the model worker.
-Table screen: GET /table (static table.html) + WebSocket /ws/table, which receives every job's events
-(queued/working/result/error, each with job {id, db_id, question} and the waiting queue) and a snapshot on connect.
+"""Gateway: static phone UI, GET /api/dbs, GET /api/status, one WebSocket /ws. A single queue consumer feeds the
+model worker. Table screen: GET /table (static table.html) + WebSocket /ws/table.
+
+Phone socket /ws (client -> server):
+  {type:"hello", client, last_job}   first message on every connect. client: stable id the phone keeps;
+                                     last_job: id of the last result/error it rendered (or null).
+  {db_id, question}                  ask. One pending question per client.
+Server -> phone (job_id on every job message):
+  {type:"welcome", client, job_id, replay}  reply to hello. job_id: this client's pending job or null;
+                                     replay: true when the last result follows because the phone missed it.
+  {type:"status", ready, warming, warm_seconds, queue, fake, probe, restarts}  after hello and on every change.
+  {type:"queued", job_id, position}  {type:"working", job_id, elapsed}  {type:"stage", job_id, stage, elapsed}
+  {type:"result", job_id, ...answer}  {type:"error", job_id?, message}
+  stage is "generating" | "scoring" | "executing" | "sampling" (sampling only when two-readings run).
+The gateway remembers each client's pending job and last result for 15 min, so a phone that drops its socket
+mid-job gets the queue position / stage / finished result again when it reconnects with the same client id.
+
+Table socket /ws/table receives a snapshot on connect, then every job's events, each with
+job {id, db_id, question} and the waiting queue: queued / working / stage {stage} / result / error.
+Pre-flight checks are broadcast too, after each successful POST /api/check, with exactly this shape:
+  {"type": "check", "job": {"id": int, "db_id": str, "question": str (only for a preset)},
+   "check": <the /api/check response object, unchanged>}
+Check ids come from the same counter as job ids, so they never collide.
 
 Run (inside WSL, repo root):  python -m server.app [--fake] [--port 8000]
+ALTIMETER_JOB_TIMEOUT (seconds, default 45): a job running longer gets an error and the worker restarts.
 """
 from __future__ import annotations
 
@@ -10,6 +31,9 @@ import argparse
 import asyncio
 import itertools
 import os
+import re
+import secrets
+import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,20 +43,40 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .preflight import annotate, router as preflight_router
-from .worker import WorkerClient, list_dbs
+from .preflight import annotate, check_listeners, router as preflight_router
+from .worker import JobTimeout, WorkerClient, list_dbs
 
 STATIC = Path(__file__).parent / "static"
 MAX_QUESTION_CHARS = 500
+CLIENT_TTL_S = 15 * 60  # forget a client's last result after this
+STALE_JOB_S = 60.0  # skip a queued job whose phone has been gone this long
+TIMEOUT_MESSAGE = "The model took too long; try a shorter question."
+CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _job_ids = itertools.count(1)
+
+
+def log(msg: str) -> None:
+    print(f"[altimeter] {time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+@dataclass
+class Client:
+    id: str
+    ws: WebSocket | None = None
+    job: Job | None = None  # pending: queued or running
+    stage: str | None = None
+    started: float | None = None  # monotonic time the pending job started running
+    last: dict[str, Any] | None = None  # last result/error message for a job (has job_id)
+    last_at: float = 0.0
+    left_at: float | None = None  # when the socket closed (None while connected)
+    seen: float = field(default_factory=time.time)
 
 
 @dataclass
 class Job:
-    ws: WebSocket
+    client: Client
     db_id: str
     question: str
-    gone: bool = False
     id: int = field(default_factory=lambda: next(_job_ids))
 
     def info(self) -> dict[str, Any]:
@@ -45,71 +89,194 @@ class Gateway:
         self.waiting: list[Job] = []  # mirror of the queue, for position updates
         self.worker: WorkerClient | None = None
         self.tables: set[WebSocket] = set()  # table-screen sockets: receive every job's events
+        self.clients: dict[str, Client] = {}
         self.current: Job | None = None
         self.last: dict[str, Any] | None = None  # last result/error broadcast, replayed to new table sockets
 
+    # ---- state ----
     def queue_info(self) -> list[dict[str, Any]]:
-        return [j.info() for j in self.waiting if not j.gone]
+        return [j.info() for j in self.waiting]
 
     def snapshot(self) -> dict[str, Any]:
         return {"type": "snapshot", "queue": self.queue_info(),
                 "current": self.current.info() if self.current else None, "last": self.last}
 
-    async def broadcast(self, job: Job, msg: dict[str, Any]) -> None:
-        msg = {**msg, "job": job.info(), "queue": self.queue_info()}
-        if msg["type"] in ("result", "error"):
-            self.last = msg
-        socks = list(self.tables)
+    def status(self) -> dict[str, Any]:
+        w = self.worker
+        ready = bool(w and w.ready)
+        info = (w.ready_info or {}) if w else {}
+        return {"ready": ready, "warming": not ready,
+                "warm_seconds": None if ready or not w else round(time.time() - w.warm_started, 1),
+                "queue": len(self.waiting) + (1 if self.current else 0),
+                "fake": bool(w and w.fake), "probe": info.get("probe") if ready else None,
+                "restarts": w.restarts if w else 0}
 
+    def attach(self, cid: str, ws: WebSocket) -> Client:
+        now = time.time()
+        for k in [k for k, c in self.clients.items()
+                  if c.job is None and c.ws is None and now - max(c.seen, c.last_at) > CLIENT_TTL_S]:
+            del self.clients[k]
+        if not CLIENT_ID.match(cid):
+            cid = secrets.token_hex(8)
+        c = self.clients.setdefault(cid, Client(cid))
+        c.ws, c.left_at, c.seen = ws, None, now
+        return c
+
+    def detach(self, c: Client, ws: WebSocket) -> None:
+        if c.ws is ws:
+            c.ws, c.left_at = None, time.time()
+
+    # ---- sending ----
+    async def send_tables(self, msg: dict[str, Any]) -> None:
         async def one(t: WebSocket) -> None:
             try:
                 await asyncio.wait_for(t.send_json(msg), 2.0)
             except Exception:  # noqa: BLE001 - slow or gone table screen: drop it
                 self.tables.discard(t)
 
-        await asyncio.gather(*(one(t) for t in socks))
+        await asyncio.gather(*(one(t) for t in list(self.tables)))
 
-    async def send(self, job: Job, msg: dict[str, Any]) -> None:
-        if job.gone:
+    async def broadcast(self, job: Job, msg: dict[str, Any]) -> None:
+        msg = {**msg, "job": job.info(), "queue": self.queue_info()}
+        if msg["type"] in ("result", "error"):
+            self.last = msg
+        await self.send_tables(msg)
+
+    async def to_client(self, c: Client, msg: dict[str, Any]) -> None:
+        ws = c.ws
+        if ws is None:
             return
         try:
-            await job.ws.send_json(msg)
-        except Exception:  # noqa: BLE001 - client went away
-            job.gone = True
+            await asyncio.wait_for(ws.send_json(msg), 5.0)
+        except Exception:  # noqa: BLE001 - phone went away; it gets the state again on reconnect
+            self.detach(c, ws)
+
+    async def send(self, job: Job, msg: dict[str, Any]) -> None:
+        c = job.client
+        msg = {**msg, "job_id": job.id}
+        if msg["type"] in ("result", "error"):
+            c.last, c.last_at, c.job, c.stage, c.started = msg, time.time(), None, None, None
+        await self.to_client(c, msg)
+
+    async def push_status(self) -> None:
+        st = {"type": "status", **self.status()}
+        await asyncio.gather(*(self.to_client(c, st) for c in list(self.clients.values()) if c.ws))
 
     async def announce_positions(self) -> None:
         for i, j in enumerate(self.waiting):
             await self.send(j, {"type": "queued", "position": i + 1})
 
+    async def resume(self, c: Client, last_job: Any) -> None:
+        """Reply to hello: what this client is waiting for, then replay whatever it missed."""
+        fresh = c.last is not None and time.time() - c.last_at < CLIENT_TTL_S
+        replay = c.job is None and fresh and c.last.get("job_id") != last_job
+        await self.to_client(c, {"type": "welcome", "client": c.id, "job_id": c.job.id if c.job else None,
+                                 "replay": replay})
+        await self.to_client(c, {"type": "status", **self.status()})
+        j = c.job
+        if j is not None and j in self.waiting:
+            await self.to_client(c, {"type": "queued", "job_id": j.id, "position": self.waiting.index(j) + 1})
+        elif j is not None and self.current is j:
+            elapsed = round(time.monotonic() - (c.started or time.monotonic()), 2)
+            await self.to_client(c, {"type": "working", "job_id": j.id, "elapsed": elapsed})
+            if c.stage:
+                await self.to_client(c, {"type": "stage", "job_id": j.id, "stage": c.stage, "elapsed": elapsed})
+        elif replay and c.last is not None:
+            await self.to_client(c, c.last)
+
+    async def submit(self, c: Client, db_id: str, question: str) -> None:
+        job = Job(c, db_id, question)
+        c.job, c.stage, c.started = job, None, None
+        self.waiting.append(job)
+        await self.send(job, {"type": "queued", "position": len(self.waiting)})
+        await self.queue.put(job)
+        await self.broadcast(job, {"type": "queued", "position": len(self.waiting)})
+
+    # ---- consumer ----
+    async def warm(self) -> None:
+        assert self.worker is not None
+        while not self.worker.ready:
+            await self.push_status()
+            try:
+                await asyncio.to_thread(self.worker.wait_ready)
+            except (EOFError, OSError) as e:
+                log(f"worker died while loading ({type(e).__name__}); restarting")
+                await asyncio.to_thread(self.worker.restart)
+                await asyncio.sleep(1.0)
+                continue
+            info = self.worker.ready_info or {}
+            log(f"worker ready after {time.time() - self.worker.warm_started:.1f} s "
+                f"(fake={info.get('fake')}, probe={info.get('probe')}, warmup={info.get('warmup')})")
+        await self.push_status()
+
+    async def stage(self, job: Job, stage: str) -> None:
+        c = job.client
+        if c.job is job:
+            c.stage = stage
+        elapsed = round(time.monotonic() - (c.started or time.monotonic()), 2)
+        await self.send(job, {"type": "stage", "stage": stage, "elapsed": elapsed})
+        await self.broadcast(job, {"type": "stage", "stage": stage})
+
+    async def run(self, job: Job) -> None:
+        assert self.worker is not None
+        loop = asyncio.get_running_loop()
+        staged: list[Any] = []
+
+        def on_stage(stage: str) -> None:  # worker thread -> event loop
+            staged.append(asyncio.run_coroutine_threadsafe(self.stage(job, stage), loop))
+
+        try:
+            res = await asyncio.to_thread(self.worker.ask, job.db_id, job.question, on_stage)
+            for f in staged:  # every stage message goes out before the result
+                await asyncio.wrap_future(f)
+            res = await asyncio.to_thread(annotate, res)  # pre-flight fan-out audit of the model's SQL
+            self.current = None
+            await self.send(job, {"type": "result", **res})
+            await self.broadcast(job, {"type": "result", **res})
+        except JobTimeout as e:
+            log(f"job {job.id} timed out ({e}); db={job.db_id} question={job.question[:80]!r}")
+            self.current = None
+            await self.send(job, {"type": "error", "message": TIMEOUT_MESSAGE, "timeout": True})
+            await self.broadcast(job, {"type": "error", "message": TIMEOUT_MESSAGE, "timeout": True})
+        except Exception as e:  # noqa: BLE001
+            log(f"job {job.id} failed: {type(e).__name__}: {e}")
+            self.current = None
+            await self.send(job, {"type": "error", "message": str(e)})
+            await self.broadcast(job, {"type": "error", "message": str(e)})
+
     async def consume(self) -> None:
         assert self.worker is not None
         while True:
+            await self.warm()  # no-op once ready; after a timeout restart this waits for the reload
             job = await self.queue.get()
             self.waiting.remove(job)
             await self.announce_positions()
-            if job.gone:
+            c = job.client
+            if c.ws is None and c.left_at is not None and time.time() - c.left_at > STALE_JOB_S:
+                log(f"job {job.id} skipped: its phone left {time.time() - c.left_at:.0f} s ago")
+                c.job = None
                 continue
             self.current = job
-            await self.send(job, {"type": "working"})
+            c.started = time.monotonic()
+            await self.send(job, {"type": "working", "elapsed": 0.0})
             await self.broadcast(job, {"type": "working"})
-            try:
-                res = await asyncio.to_thread(self.worker.ask, job.db_id, job.question)
-                res = await asyncio.to_thread(annotate, res)  # pre-flight fan-out audit of the model's SQL
-                await self.send(job, {"type": "result", **res})
-                self.current = None
-                await self.broadcast(job, {"type": "result", **res})
-            except Exception as e:  # noqa: BLE001
-                await self.send(job, {"type": "error", "message": str(e)})
-                self.current = None
-                await self.broadcast(job, {"type": "error", "message": str(e)})
+            await self.run(job)
 
 
 gw = Gateway()
 
 
+async def _on_check(out: dict[str, Any], preset: dict[str, Any] | None) -> None:
+    job: dict[str, Any] = {"id": next(_job_ids), "db_id": out.get("db_id")}
+    if preset:
+        job["question"] = preset["question"]
+    await gw.send_tables({"type": "check", "job": job, "check": out})
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     gw.worker = WorkerClient()
+    check_listeners.append(_on_check)
     task = asyncio.create_task(gw.consume())
     yield
     task.cancel()
@@ -140,14 +307,29 @@ def dbs() -> dict[str, Any]:
     return {"dbs": list_dbs(), "fake": bool(gw.worker and gw.worker.fake)}
 
 
+@app.get("/api/status")
+def status() -> dict[str, Any]:
+    return gw.status()
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     known = set(list_dbs())
-    mine: list[Job] = []
+    client: Client | None = None
     try:
         while True:
             msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "hello":
+                if client is not None:
+                    gw.detach(client, ws)
+                client = gw.attach(str(msg.get("client") or ""), ws)
+                await gw.resume(client, msg.get("last_job"))
+                continue
+            if client is None:  # a page from before hello existed: anonymous client for this socket
+                client = gw.attach("", ws)
             db_id, question = str(msg.get("db_id", "")), str(msg.get("question", "")).strip()
             if db_id not in known:
                 await ws.send_json({"type": "error", "message": f"unknown database: {db_id}"})
@@ -155,17 +337,15 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if not question or len(question) > MAX_QUESTION_CHARS:
                 await ws.send_json({"type": "error", "message": f"question must be 1-{MAX_QUESTION_CHARS} characters"})
                 continue
-            job = Job(ws, db_id, question)
-            mine.append(job)
-            gw.waiting.append(job)
-            await ws.send_json({"type": "queued", "position": len(gw.waiting)})
-            await gw.queue.put(job)
-            await gw.broadcast(job, {"type": "queued", "position": len(gw.waiting)})
+            if client.job is not None:
+                await ws.send_json({"type": "error", "message": "Your last question is still in flight."})
+                continue
+            await gw.submit(client, db_id, question)
     except (WebSocketDisconnect, RuntimeError, ValueError):
         pass
     finally:
-        for j in mine:
-            j.gone = True
+        if client is not None:
+            gw.detach(client, ws)
 
 
 @app.websocket("/ws/table")

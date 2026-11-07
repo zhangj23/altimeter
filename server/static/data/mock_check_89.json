@@ -1,0 +1,38 @@
+{
+ "type": "check",
+ "job": {
+  "id": 0,
+  "db_id": "financial",
+  "question": "How many accounts in East Bohemia chose statement issuance after each transaction?"
+ },
+ "check": {
+  "db_id": "financial",
+  "sql": "SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'",
+  "parses": true,
+  "parse_error": null,
+  "audited": true,
+  "flagged": false,
+  "findings": [],
+  "message": "no fan-out detected",
+  "audit_error": null,
+  "explanation": "",
+  "highlights": [],
+  "intended": "",
+  "original": {
+   "columns": [
+    "COUNT(T2.account_id)"
+   ],
+   "rows": [
+    [
+     13
+    ]
+   ],
+   "error": null,
+   "seconds": 0.0006,
+   "rows_capped": false
+  },
+  "corrected": null,
+  "headline": null,
+  "audit_seconds": 0.0036
+ }
+}
