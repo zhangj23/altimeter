@@ -1,0 +1,132 @@
+N=2563 correct=0.478 dbs=31 layers=37 bird=1531 spider=1032
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+  [select on spider] last_prompt  layer  0  AUROC 0.424
+  [select on spider] last_prompt  layer  2  AUROC 0.538
+  [select on spider] last_prompt  layer  4  AUROC 0.568
+  [select on spider] last_prompt  layer  6  AUROC 0.508
+  [select on spider] last_prompt  layer  8  AUROC 0.497
+  [select on spider] last_prompt  layer 10  AUROC 0.591
+  [select on spider] last_prompt  layer 12  AUROC 0.537
+  [select on spider] last_prompt  layer 14  AUROC 0.569
+  [select on spider] last_prompt  layer 16  AUROC 0.559
+  [select on spider] last_prompt  layer 18  AUROC 0.568
+  [select on spider] last_prompt  layer 20  AUROC 0.616
+  [select on spider] last_prompt  layer 22  AUROC 0.605
+  [select on spider] last_prompt  layer 24  AUROC 0.607
+  [select on spider] last_prompt  layer 26  AUROC 0.645
+  [select on spider] last_prompt  layer 28  AUROC 0.621
+  [select on spider] last_prompt  layer 30  AUROC 0.656
+  [select on spider] last_prompt  layer 32  AUROC 0.682
+  [select on spider] last_prompt  layer 34  AUROC 0.688
+  [select on spider] last_prompt  layer 36  AUROC 0.682
+C:\hack\venv\Lib\site-packages\sklearn\decomposition\_pca.py:787: RuntimeWarning: invalid value encountered in divide
+  self.explained_variance_ratio_ = self.explained_variance_ / total_var
+  [select on spider] last_gen     layer  0  AUROC 0.424
+  [select on spider] last_gen     layer  2  AUROC 0.625
+  [select on spider] last_gen     layer  4  AUROC 0.694
+  [select on spider] last_gen     layer  6  AUROC 0.683
+  [select on spider] last_gen     layer  8  AUROC 0.713
+  [select on spider] last_gen     layer 10  AUROC 0.712
+  [select on spider] last_gen     layer 12  AUROC 0.720
+  [select on spider] last_gen     layer 14  AUROC 0.712
+  [select on spider] last_gen     layer 16  AUROC 0.717
+  [select on spider] last_gen     layer 18  AUROC 0.717
+  [select on spider] last_gen     layer 20  AUROC 0.675
+  [select on spider] last_gen     layer 22  AUROC 0.697
+  [select on spider] last_gen     layer 24  AUROC 0.720
+  [select on spider] last_gen     layer 26  AUROC 0.758
+  [select on spider] last_gen     layer 28  AUROC 0.752
+  [select on spider] last_gen     layer 30  AUROC 0.751
+  [select on spider] last_gen     layer 32  AUROC 0.740
+  [select on spider] last_gen     layer 34  AUROC 0.744
+  [select on spider] last_gen     layer 36  AUROC 0.758
+  [select on spider] mean_gen     layer  0  AUROC 0.662
+  [select on spider] mean_gen     layer  2  AUROC 0.642
+  [select on spider] mean_gen     layer  4  AUROC 0.663
+  [select on spider] mean_gen     layer  6  AUROC 0.667
+  [select on spider] mean_gen     layer  8  AUROC 0.659
+  [select on spider] mean_gen     layer 10  AUROC 0.682
+  [select on spider] mean_gen     layer 12  AUROC 0.700
+  [select on spider] mean_gen     layer 14  AUROC 0.718
+  [select on spider] mean_gen     layer 16  AUROC 0.722
+  [select on spider] mean_gen     layer 18  AUROC 0.733
+  [select on spider] mean_gen     layer 20  AUROC 0.746
+  [select on spider] mean_gen     layer 22  AUROC 0.762
+  [select on spider] mean_gen     layer 24  AUROC 0.773
+  [select on spider] mean_gen     layer 26  AUROC 0.794
+  [select on spider] mean_gen     layer 28  AUROC 0.775
+  [select on spider] mean_gen     layer 30  AUROC 0.784
+  [select on spider] mean_gen     layer 32  AUROC 0.787
+  [select on spider] mean_gen     layer 34  AUROC 0.763
+  [select on spider] mean_gen     layer 36  AUROC 0.746
+selected mean_gen@26; best prompt-only last_prompt@34
+
+== BIRD (headline; not used for selection): n=1531, correct=0.355, dbs=11
+  logprob_mean                             0.754  [0.719, 0.793]
+  logprob_min                              0.709  [0.665, 0.758]
+  surface_complexity                       0.849  [0.813, 0.882]
+  prompt_only_probe[last_prompt@34]        0.682  [0.608, 0.761]
+  probe[mean_gen@26]                       0.797  [0.757, 0.834]
+  stack_without_probe                      0.896  [0.871, 0.918]
+  stacked                                  0.901  [0.881, 0.923]
+  shuffled_label_control                   0.465  [0.441, 0.497]
+  delta_probe_minus_logprob                +0.043  [+0.001, +0.073]  CI excludes 0
+  delta_stacked_minus_stack_without_probe  +0.005  [-0.002, +0.013]  CI includes 0
+
+== Spider (selection set, optimistic): n=1032, correct=0.661, dbs=20
+  logprob_mean                             0.684  [0.617, 0.745]
+  logprob_min                              0.677  [0.620, 0.733]
+  surface_complexity                       0.791  [0.728, 0.829]
+  prompt_only_probe[last_prompt@34]        0.655  [0.598, 0.698]
+  probe[mean_gen@26]                       0.813  [0.758, 0.856]
+  stack_without_probe                      0.831  [0.763, 0.881]
+  stacked                                  0.842  [0.768, 0.896]
+  shuffled_label_control                   0.462  [0.422, 0.507]
+  delta_probe_minus_logprob                +0.129  [+0.072, +0.189]  CI excludes 0
+  delta_stacked_minus_stack_without_probe  +0.012  [+0.000, +0.024]  CI excludes 0
+
+== BIRD, executable SQL only: n=994, correct=0.547, dbs=11
+  logprob_mean                             0.733  [0.688, 0.768]
+  logprob_min                              0.671  [0.638, 0.705]
+  surface_complexity                       0.670  [0.619, 0.716]
+  prompt_only_probe[last_prompt@34]        0.668  [0.609, 0.723]
+  probe[mean_gen@26]                       0.752  [0.694, 0.793]
+  stack_without_probe                      0.772  [0.720, 0.811]
+  stacked                                  0.783  [0.730, 0.824]
+  shuffled_label_control                   0.481  [0.442, 0.525]
+  delta_probe_minus_logprob                +0.019  [-0.024, +0.049]  CI includes 0
+  delta_stacked_minus_stack_without_probe  +0.012  [-0.004, +0.027]  CI includes 0
+
+== pooled: n=2563, correct=0.478, dbs=31
+  logprob_mean                             0.719  [0.676, 0.754]
+  logprob_min                              0.711  [0.666, 0.753]
+  surface_complexity                       0.850  [0.815, 0.878]
+  prompt_only_probe[last_prompt@34]        0.691  [0.632, 0.754]
+  probe[mean_gen@26]                       0.824  [0.791, 0.855]
+  stack_without_probe                      0.886  [0.851, 0.910]
+  stacked                                  0.893  [0.859, 0.917]
+  shuffled_label_control                   0.466  [0.445, 0.492]
+  delta_probe_minus_logprob                +0.106  [+0.073, +0.145]  CI excludes 0
+  delta_stacked_minus_stack_without_probe  +0.007  [+0.001, +0.013]  CI excludes 0
+
+Stacked needle reliability (pooled OOF), ECE=0.021
+  [0.0, 0.1]  n= 691  mean_pred=0.005  frac_correct=0.009
+  [0.1, 0.2]  n=  82  mean_pred=0.158  frac_correct=0.146
+  [0.2, 0.3]  n= 113  mean_pred=0.253  frac_correct=0.292
+  [0.3, 0.4]  n= 180  mean_pred=0.349  frac_correct=0.367
+  [0.4, 0.5]  n= 192  mean_pred=0.448  frac_correct=0.500
+  [0.5, 0.6]  n= 174  mean_pred=0.544  frac_correct=0.552
+  [0.6, 0.7]  n= 176  mean_pred=0.650  frac_correct=0.653
+  [0.7, 0.8]  n= 241  mean_pred=0.754  frac_correct=0.697
+  [0.8, 0.9]  n= 422  mean_pred=0.856  frac_correct=0.879
+  [0.9, 1.0]  n= 292  mean_pred=0.928  frac_correct=0.901
+saved C:\hack\runs\probe_v1.pkl and C:\hack\runs\probe_v1.json (excluded dbs: ['california_schools', 'codebase_community', 'formula_1'])
