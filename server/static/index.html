@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2eee5">
+<title>Altimeter</title>
+<link rel="icon" href="data:,">
+<style>
+@font-face { font-family: "Poppins"; font-weight: 400; font-style: normal; font-display: swap; src: url(fonts/poppins-400.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 500; font-style: normal; font-display: swap; src: url(fonts/poppins-500.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 600; font-style: normal; font-display: swap; src: url(fonts/poppins-600.woff2) format("woff2"); }
+
+:root {
+  --paper: #f2eee5;
+  --paper-2: #e8e2d5;
+  --field: #faf7f0;
+  --sheet: #f7f3eb;
+  --ink: #1e2329;
+  --ink-2: #4a5058;
+  --rule: #c9c1b0;
+  --accent: #b9481a;
+  --accent-ink: #fbf7ef;
+  --cruise: #2e7a4c;
+  --caution: #b98a12;
+  --ask: #ad3328;
+  --caution-ink: #81600a; /* caution as text: the band fill is too light for small type on paper */
+  --diff: #ead8a4;
+  /* type scale, ratio 1.25 */
+  --t0: 14px; --t1: 17.5px; --t2: 21.9px; --t3: 27.3px; --t4: 34.2px; --t5: 53.4px;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  --climb: 650ms;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 var(--t1)/1.45 "Poppins", sans-serif;
+}
+main { max-width: 640px; padding: 14px 16px 56px; }
+@media (min-width: 720px) { main { margin-left: 6vw; padding-top: 28px; } }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 2px solid var(--ink); }
+h1 { margin: 0; font-size: var(--t2); font-weight: 600; letter-spacing: 0.01em; }
+#link { font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
+#link.down { color: var(--ask); }
+
+#radio {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 5;
+  padding: 10px 16px; background: var(--ask); color: var(--accent-ink);
+  font-size: var(--t0); font-weight: 500;
+  transform: translateY(-100%); transition: transform 180ms ease-out;
+}
+#radio.on { transform: translateY(0); }
+
+/* instrument */
+.instrument { display: grid; grid-template-columns: auto 1fr; align-items: end; gap: 6px 22px; padding: 26px 0 14px; }
+.readout { font-size: var(--t5); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; min-width: 2.6ch; }
+.readout small { display: block; margin-top: 8px; font-size: var(--t0); font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.readout small.awaiting { color: var(--ink-2); }
+@media (max-width: 479px) {
+  .instrument { grid-template-columns: 1fr; gap: 10px; padding-top: 20px; }
+  .readout { display: flex; align-items: baseline; gap: 14px; }
+  .readout small { margin-top: 0; }
+}
+.tape { position: relative; padding-top: 18px; }
+.ticks { position: relative; height: 10px; }
+.ticks span { position: absolute; top: 0; width: 1px; height: 100%; background: var(--ink); }
+.bands { display: flex; height: 14px; opacity: 0.35; transition: opacity 300ms ease-out; }
+.tape.scored .bands { opacity: 1; }
+.bands span { display: block; }
+.b-ask { background: var(--ask); }
+.b-caution { background: var(--caution); }
+.b-cruise { background: var(--cruise); }
+.names { display: flex; margin-top: 6px; font-size: var(--t0); font-weight: 500; }
+.names span { padding-left: 4px; border-left: 1px solid var(--ink); overflow: hidden; }
+/* The needle box is widened by 8px each side and clips, so the full-width carriage can translate by 100%
+   without widening the page while the marker head (7px half-width) stays visible at both ends. */
+.needle {
+  position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; overflow: hidden; pointer-events: none;
+  opacity: 0; transition: opacity 200ms ease-out;
+}
+.needle.hold, .needle.on { opacity: 1; }
+.carriage {
+  position: absolute; top: 0; bottom: 0; left: 8px; width: calc(100% - 16px);
+  transform: translateX(0); transition: transform var(--climb) cubic-bezier(.22,.61,.36,1);
+}
+.carriage.snap { transition: none; }
+.carriage i { position: absolute; top: 8px; left: -1px; height: calc(100% - 30px); border-left: 2px solid var(--ink); }
+.carriage svg { position: absolute; top: 0; left: -7px; overflow: visible; }
+.carriage .head-fill { fill: var(--ink); transition: opacity 200ms ease-out; }
+.carriage .head-hollow { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.5; opacity: 0; transition: opacity 200ms ease-out; }
+.needle.hold i { border-left: 2px dashed var(--ink-2); }
+.needle.hold .head-fill { opacity: 0; }
+.needle.hold .head-hollow { opacity: 1; }
+#status { margin: 0; min-height: 1.45em; font-size: var(--t0); font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* ask form */
+form { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--rule); }
+label { display: block; font-size: var(--t0); font-weight: 600; margin-bottom: 4px; }
+select, textarea, button { font: inherit; color: inherit; }
+select, textarea {
+  width: 100%; border: 1px solid var(--ink); border-radius: 4px; background: var(--field);
+  padding: 10px 12px; font-size: 16px;
+}
+select { margin-bottom: 14px; }
+textarea { resize: vertical; min-height: 76px; line-height: 1.4; }
+select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#ask {
+  margin-top: 12px; min-width: 132px; padding: 12px 26px; border: 0; border-radius: 4px;
+  background: var(--accent); color: var(--accent-ink); font-size: var(--t1); font-weight: 600; cursor: pointer;
+}
+#ask:active { transform: translateY(1px); }
+#ask:disabled { background: var(--ink-2); cursor: default; }
+
+/* boarding pass */
+#passes { margin-top: 30px; }
+.pass { border: 1.5px solid var(--ink); border-radius: 6px; margin-bottom: 20px; background: var(--sheet); animation: arrive 260ms ease-out both; }
+@keyframes arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.pass > section { padding: 14px 16px; }
+.pass .q { font-size: var(--t1); font-weight: 600; margin: 0 0 4px; }
+.pass .route { font-size: var(--t0); font-weight: 500; color: var(--ink-2); margin: 0; }
+.perf { position: relative; border-top: 1.5px dashed var(--ink); }
+/* square ticket notches at each perforation */
+.perf::before, .perf::after { content: ""; position: absolute; top: -8.75px; width: 8px; height: 16px; border: 1.5px solid var(--ink); background: var(--paper); }
+.perf::before { left: -1.5px; border-left: 0; }
+.perf::after { right: -1.5px; border-right: 0; }
+pre.sql {
+  margin: 0; padding: 12px; background: var(--paper-2); border-radius: 4px; overflow-x: auto;
+  font: 14px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word;
+}
+pre.sql mark { background: var(--diff); color: var(--ink); border-bottom: 2px solid var(--caution-ink); }
+.err { color: var(--ask); font-weight: 500; font-size: var(--t0); margin: 10px 0 0; }
+.table-wrap { overflow-x: auto; margin-top: 12px; }
+table { border-collapse: collapse; font-size: var(--t0); font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 14px 5px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+th { font-weight: 600; border-bottom: 1.5px solid var(--ink); }
+td.null { color: var(--ink-2); font-style: italic; }
+.count { font-size: var(--t0); color: var(--ink-2); margin: 8px 0 0; }
+.tag { margin: 0 0 6px; font-size: var(--t0); font-weight: 600; }
+dl.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px 18px; margin: 0; font-size: var(--t0); }
+dl.facts dt { font-weight: 600; }
+dl.facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* two readings: sections of the pass, split by a plain rule, not cards */
+.readings h2 { margin: 0 0 2px; font-size: var(--t1); font-weight: 600; }
+.readings > p { margin: 0 0 12px; font-size: var(--t0); color: var(--ink-2); }
+.reading { padding: 12px 0 14px 14px; border-left: 3px solid var(--rule); cursor: pointer; }
+.reading + .reading { margin-top: 14px; }
+.reading .rhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.reading .rname { font-size: var(--t1); font-weight: 600; }
+.reading .rname span { display: inline-block; white-space: nowrap; margin-left: 10px; font-size: var(--t0); font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.choose {
+  flex: none; padding: 6px 14px; border: 1.5px solid var(--ink); border-radius: 4px; background: transparent;
+  font-size: var(--t0); font-weight: 600; cursor: pointer;
+}
+.choose:active { transform: translateY(1px); }
+.reading .picked { display: none; font-size: var(--t0); font-weight: 600; }
+.reading.chosen { border-left: 5px solid var(--ink); padding-left: 12px; cursor: default; }
+.reading.chosen .choose { display: none; }
+.reading.chosen .picked { display: block; }
+.reading.dropped { padding-top: 6px; padding-bottom: 6px; }
+.reading.dropped .rhead { margin-bottom: 0; }
+.reading.dropped .rbody { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-delay: 0s !important; }
+}
+</style>
+</head>
+<body>
+<div id="radio" role="status">Radio lost. Reconnecting to the laptop.</div>
+<main>
+  <header>
+    <h1>Altimeter</h1>
+    <span id="link">Connecting</span>
+  </header>
+
+  <div class="instrument" role="group" aria-label="Confidence">
+    <div class="readout"><span id="value">--</span><small id="band">No reading</small></div>
+    <div class="tape" id="tape" aria-hidden="true">
+      <div class="ticks" id="ticks"></div>
+      <div class="bands" id="bands"></div>
+      <div class="names" id="names"></div>
+      <div class="needle" id="needle"><div class="carriage" id="carriage"><i></i><svg width="14" height="10" viewBox="0 0 14 10"><path class="head-fill" d="M0 0H14L7 10Z"/><path class="head-hollow" d="M1 0.75H13L7 9Z"/></svg></div></div>
+    </div>
+  </div>
+  <p id="status"></p>
+  <p id="announce" class="sr" aria-live="polite"></p>
+
+  <form id="form" autocomplete="off">
+    <label for="db">Database</label>
+    <select id="db"></select>
+    <label for="question">Question</label>
+    <textarea id="question" maxlength="500" rows="2" required></textarea>
+    <button id="ask" type="submit">Ask</button>
+  </form>
+
+  <div id="passes"></div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

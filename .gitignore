@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.claude/
+runs/
+*.pt
+*.pkl
+.venv/
