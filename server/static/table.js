@@ -498,7 +498,91 @@ function fitNumbers(reveal, chars) { // one font size that fits every big number
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
   const gaps = 3.4 * rem * Math.max(0, reveal.children.length - 1);
   const px = (w - gaps) / (0.62 * Math.max(4, chars));
-  reveal.style.setProperty("--num", `${Math.max(3 * rem, Math.min(7.5 * rem, px)).toFixed(0)}px`);
+  const max = reveal.classList.contains("withfan") ? 4.8 : 7.5; // the grid needs the height
+  reveal.style.setProperty("--num", `${Math.max(3 * rem, Math.min(max * rem, px)).toFixed(0)}px`);
+}
+
+// Ids that share a prefix up to a separator (TR496_1, TR496_10) are shown without it; the caption names it.
+function shortIds(ids) {
+  const labels = ids.map(String);
+  if (labels.length < 2 || !ids.every((v) => typeof v === "string")) return { labels, prefix: "" };
+  let p = labels[0];
+  for (const s of labels) while (!s.startsWith(p)) p = p.slice(0, -1);
+  const cut = p.search(/[^A-Za-z0-9][A-Za-z0-9]*$/);
+  p = cut >= 0 ? p.slice(0, cut + 1) : "";
+  if (p.length < 3 || labels.some((s) => s.length === p.length)) return { labels, prefix: "" };
+  return { labels: labels.map((s) => s.slice(p.length)), prefix: p };
+}
+
+// The rows the JOIN produced, one cell per (left row, right row) pair, from the /api/check fanout payload.
+function fanStrip(fo, f, h) {
+  const g = fo.grid, L = fo.left, R = fo.right, G = g.group;
+  const rl = shortIds(g.rows), cl = shortIds(g.cols);
+  const lk = `${L.table}.${L.key}`, rk = `${R.table}.${R.key}`;
+  const full = g.cells.length === g.rows.length * g.cols.length;
+  const of = (k, n) => (k === n ? `all ${nfmt(n)}` : `${k} of ${nfmt(n)}`);
+  let cap;
+  if (!g.sampled) cap = `Every joined row: ${lk} down, ${rk} across.`;
+  else if (G) {
+    const why = h && h.row != null && String(h.row) === String(G.value) ? "the headline row" : `has the most repeated ${L.table} row`;
+    cap = `Sample from ${G.column} ${G.value} (${why}): ${of(g.rows.length, G.left)} ${lk} down, ${of(g.cols.length, G.right)} ${rk} across.`;
+  } else {
+    cap = `Sample around the most repeated ${L.table} row: ${g.rows.length} of ${nfmt(L.distinct)} ${lk} down, ${g.cols.length} of ${nfmt(R.distinct)} ${rk} across.`;
+  }
+  if (!full) cap += " Empty cell: a pair the JOIN did not produce.";
+  const pre = [...new Set([rl.prefix, cl.prefix].filter(Boolean))];
+  if (pre.length) cap += ` Ids without ${pre.join(" / ")}.`;
+  if (g.cells.some((c) => c[2] > 1)) cap += " A number is how many joined rows share that pair.";
+
+  const grid = el("div", "fgrid");
+  grid.append(el("span"));
+  for (const v of cl.labels) grid.append(el("span", "h", v));
+  const n = new Map(g.cells.map((c) => [c[0] * 100000 + c[1], c[2]]));
+  const cells = [];
+  g.rows.forEach((_, r) => {
+    grid.append(el("span", "rh", rl.labels[r]));
+    g.cols.forEach((_, k) => {
+      const slot = el("span", "slot");
+      const v = n.get(r * 100000 + k);
+      if (v) { const c = el("i", "c", v > 1 ? String(v) : null); slot.append(c); cells.push(c); }
+      grid.append(slot);
+    });
+  });
+  const box = el("div", "fbox");
+  box.append(el("p", "fcap", cap), grid);
+
+  const factor = el("div", "factor");
+  const agg = f.aggregate && f.aggregate.length <= 32 ? f.aggregate : "The aggregate";
+  const eq = (n, a, m, b, k) => (n * m === k ? `${nfmt(n)} ${a} × ${nfmt(m)} ${b} = ${nfmt(k)} rows` : `${nfmt(n)} ${a} rows and ${nfmt(m)} ${b} rows join into ${nfmt(k)}`);
+  let big, sub, lab = null;
+  if (fo.cross) {
+    big = eq(L.distinct, L.table, R.distinct, R.table, fo.joined_rows);
+    sub = `${agg} counts ${nfmt(fo.joined_rows)} rows for ${nfmt(L.distinct)} ${L.table}.`;
+  } else {
+    const per = fo.link ? `${R.table} row with the same ${fo.link}` : `${R.table} row it joins`;
+    const all = `${nfmt(L.distinct)} ${L.table} rows become ${nfmt(fo.joined_rows)} joined rows.`;
+    sub = `Each ${L.table} row repeats once per ${per}, up to ${nfmt(fo.max_repeat)} times.`;
+    if (G) { lab = `${G.column} ${G.value}`; big = eq(G.left, L.table, G.right, R.table, G.joined_rows); sub += ` Overall, ${all}`; }
+    else big = `${nfmt(L.distinct)} ${L.table} rows → ${nfmt(fo.joined_rows)} joined rows`;
+  }
+  if (lab) factor.append(el("small", null, lab));
+  factor.append(el("b", big.length > 26 ? "long" : null, big), el("p", null, sub));
+  const node = el("div", "fan");
+  node.append(box, factor);
+
+  const size = () => { // cell size from the space there is; header labels always fit
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const W = $("checkcol").clientWidth, H = $("checkcol").clientHeight;
+    const C = g.cols.length, Rn = g.rows.length;
+    const lab = Math.max(0, ...[...grid.querySelectorAll(".h")].map((x) => x.scrollWidth)) + 6;
+    const rh = Math.max(0, ...[...grid.querySelectorAll(".rh")].map((x) => x.scrollWidth)) + 0.5 * rem;
+    const cw = Math.max(lab, Math.min(4.6 * rem, (W - 19 * rem - 2.6 * rem - rh - 2 * C) / C));
+    const cap = box.firstChild.offsetHeight;
+    const ch = Math.max(0.55 * rem, Math.min(2.6 * rem, (0.26 * H - cap - 1.2 * rem) / (Rn + 1) - 2));
+    grid.style.gridTemplateColumns = `auto repeat(${C}, ${cw.toFixed(1)}px)`;
+    grid.style.setProperty("--ch", `${ch.toFixed(1)}px`);
+  };
+  return { node, cells, size };
 }
 
 function showCheck(m, animate) {
@@ -526,6 +610,18 @@ function showCheck(m, animate) {
   const orig = c.original || {};
   let chars = 0;
 
+  // fan-out grid (first finding with one): cells fill one by one, then the factor line, then the strike
+  const fo = flagged ? (c.findings || []).map((f) => f.fanout).find((x) => x && x.grid && x.grid.cells && x.grid.cells.length) : null;
+  const fanN = fo ? fo.grid.cells.length : 0;
+  const stag = Math.min(55, 2800 / Math.max(1, fanN));
+  const K = { ...CK }, Q = { ...CALM };
+  if (fo) {
+    const g0 = h ? 800 : 700;
+    const factor = g0 + 300 + (fanN - 1) * stag + 160 + 300;
+    Object.assign(K, { fan: g0, cells: g0 + 300, factor, hl: factor + 300, strike: factor + 900, after: factor + 1600, ratio: factor + 2400, why: factor + 3200 });
+    Object.assign(Q, { fan: g0, cells: g0 + 300, factor, word: factor + 700, why: factor + 1300 });
+  }
+
   if (flagged && h) {
     if (!h.single_cell) {
       const cols = orig.columns || [];
@@ -537,8 +633,8 @@ function showCheck(m, animate) {
     before.append(el("small", null, "As written"), bb);
     const after = el("div", "rv");
     after.append(el("small", null, "Deduplicated"), el("b", null, h.after_text));
-    reveal.append(ph(before, CK.before), ph(after, CK.after, "ph after"));
-    at(CK.strike, () => before.classList.add("struck"));
+    reveal.append(ph(before, K.before), ph(after, K.after, "ph after"));
+    at(K.strike, () => before.classList.add("struck"));
     chars = h.before_text.length + h.after_text.length;
     const rw = ratioWords(h);
     if (rw) {
@@ -547,7 +643,7 @@ function showCheck(m, animate) {
       if (rw[0].endsWith("×")) rb.append(el("span", "x", "×"));
       rb.append(el("span", "w", rw[1]));
       ratio.append(rb);
-      reveal.append(ph(ratio, CK.ratio));
+      reveal.append(ph(ratio, K.ratio));
       chars += rw[0].length + rw[1].length * 0.3;
     }
   } else {
@@ -555,18 +651,29 @@ function showCheck(m, animate) {
     if (v) {
       const val = el("div", "rv");
       val.append(el("small", null, flagged ? "As written, unverified" : "Result"), el("b", null, v));
-      reveal.append(ph(val, CALM.value));
+      reveal.append(ph(val, Q.value));
       chars = v.length;
     }
     const word = el("div", "rv okword");
     const wb = el("b", null, flagged ? "Double counted" : failed ? "Audit incomplete" : "No double counting found");
     wb.style.color = flagged ? "var(--ask)" : failed ? "var(--caution-ink)" : "";
     word.append(wb);
-    reveal.append(ph(word, CALM.word));
+    reveal.append(ph(word, Q.word));
     chars = Math.max(chars + 8, 12);
   }
   col.append(reveal);
   fitNumbers(reveal, chars);
+  let fan = null;
+  if (fo) {
+    const T0 = h ? K : Q;
+    fan = fanStrip(fo, c.findings.find((f) => f.fanout === fo), h);
+    col.append(fan.node);
+    reveal.classList.add("withfan");
+    fitNumbers(reveal, chars);
+    ph(fan.node.firstChild, T0.fan);
+    ph(fan.node.lastChild, T0.factor);
+    fan.cells.forEach((x, i) => at(T0.cells + i * stag, () => x.classList.add("on")));
+  }
 
   const body = el("div", "ck-body");
   const left = el("div");
@@ -575,7 +682,7 @@ function showCheck(m, animate) {
   col.append(body);
 
   // why: verdict, plain-English explanation, the auditor's counts, where the corrected number came from
-  const whyT = flagged && h ? CK.why : CALM.why;
+  const whyT = flagged && h ? K.why : Q.why;
   if (flagged) {
     if (h) why.append(el("p", "vword", "Double counted"));
     if (c.explanation) why.append(el("p", "expl", c.explanation));
@@ -608,17 +715,18 @@ function showCheck(m, animate) {
   const range = el("span", "range");
   if (spans.length) key.append(el("span", "agg", "aggregate that counts too much"), el("span", "join", "JOIN that repeats its rows"));
   key.append(range);
-  ph(key, spans.length ? CK.hl : 0);
+  ph(key, spans.length ? K.hl : 0);
   const cor = c.corrected;
   const corHead = flagged && h && cor && cor.sql
     ? (cor.source === "hand" ? "Corrected SQL (hand-written fix)" : "Corrected SQL (auditor's rewrite)") : null;
   let hlOn = false, corOn = false, view = null, corNodes = [];
-  if (spans.length) at(CK.hl, () => { hlOn = true; if (view) view.hl.classList.add("on"); });
-  at(CK.why, () => { corOn = true; corNodes.forEach((x) => x.classList.add("on")); });
+  if (spans.length) at(K.hl, () => { hlOn = true; if (view) view.hl.classList.add("on"); });
+  at(K.why, () => { corOn = true; corNodes.forEach((x) => x.classList.add("on")); });
 
   // Lay out the query and the why column for the space there is. Runs again once Poppins has loaded.
   const fit = () => {
     if (!col.contains(left)) return;
+    if (fan) fan.size();
     const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
     let n = Math.max(4, Math.floor(left.clientHeight / (0.95 * 1.5 * fs)));
     for (let ctx = 1; ; ) {
@@ -645,7 +753,7 @@ function showCheck(m, animate) {
     }
     // why column: step the type down until it fits (long explanations list several tables)
     why.className = "why";
-    for (const lvl of ["t1", "t2", "t3"]) { // cumulative: t3 keeps the t1 and t2 reductions
+    for (const lvl of fan ? ["t1", "t2", "t3", "t4"] : ["t1", "t2", "t3"]) { // cumulative; t4 (grid shown) drops the table
       if (why.scrollHeight <= why.clientHeight + 1) break;
       why.classList.add(lvl);
     }

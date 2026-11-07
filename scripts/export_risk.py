@@ -3,7 +3,7 @@
 Reads the OOF jsonl written by train_probe.py and writes server/static/data/risk.json with
 {source_note, n, n_bird, n_spider, rows: [{s, y, src}]}. No question text leaves this script.
 
-    python scripts/export_risk.py [--oof ~/runs/g2/probe_g2_results_oof.jsonl] [--out server/static/data/risk.json]
+    python scripts/export_risk.py [--oof ~/runs/v1/probe_v1_results_oof.jsonl] [--out server/static/data/risk.json]
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OOF = Path.home() / "runs" / "g2" / "probe_g2_results_oof.jsonl"
+DEFAULT_OOF = Path.home() / "runs" / "v1" / "probe_v1_results_oof.jsonl"
 DEFAULT_OUT = ROOT / "server" / "static" / "data" / "risk.json"
 
 
@@ -24,7 +24,8 @@ def load(path: Path) -> list[dict]:
         r = json.loads(line)
         if r.get("stacked_oof") is None or r.get("label") is None:
             continue
-        rows.append({"s": round(float(r["stacked_oof"]), 4), "y": int(r["label"]), "src": str(r["source"])})
+        rows.append({"s": round(float(r["stacked_oof"]), 4), "y": int(r["label"]), "src": str(r["source"]),
+                     "db": str(r["db_id"])})
     return rows
 
 
@@ -44,11 +45,13 @@ def main() -> None:
     rows = load(args.oof)
     n_bird = sum(r["src"] == "bird" for r in rows)
     n_spider = sum(r["src"] == "spider" for r in rows)
-    note = args.note or (f"Out-of-fold scores from {len(rows)} benchmark questions, partial run; each question "
-                         "scored by a model that never saw its database")
+    n_dbs = len({r["db"] for r in rows})
+    note = args.note or (f"Out-of-fold scores from {len(rows):,} benchmark questions across {n_dbs} databases; "
+                         "each scored by a model that never saw its database.")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"source_note": note, "n": len(rows), "n_bird": n_bird, "n_spider": n_spider,
-                                    "rows": rows}, separators=(",", ":")))
+                                    "rows": [{k: r[k] for k in ("s", "y", "src")} for r in rows]},
+                                   separators=(",", ":")))
 
     print(f"wrote {args.out}  n={len(rows)} (bird {n_bird}, spider {n_spider})")
     for name, sub in (("both", rows), ("bird", [r for r in rows if r["src"] == "bird"]),

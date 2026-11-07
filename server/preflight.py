@@ -2,7 +2,9 @@
 
 POST /api/check {db_id, sql, preset?} -> audit + original result + corrected result (auditor rewrite, or a
 hand-written fix for a preset whose SQL is unchanged) + headline (first number that changed) + highlights.
-GET /api/presets -> real queries from the BIRD dev answer keys (three with verified fan-out, one clean).
+GET /api/presets -> real queries from the BIRD dev answer keys (five with verified fan-out, one clean).
+/api/check also returns, per flagged finding, "fanout": the counted table vs the table that repeats it, their
+distinct key counts, the joined row count and up to 12 x 12 real key ids (see fanouts()).
 annotate(result) adds result["audit"] to a worker answer (same shape, without "original": the answer itself).
 """
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections import Counter
 from typing import Any, Awaitable, Callable
 
 import sqlglot
@@ -184,21 +187,44 @@ _Q200_FIX = (_Q200
              .replace("SUM(CASE WHEN b.bond_type = '#' THEN 1 ELSE 0 END)",
                       "COUNT(DISTINCT CASE WHEN b.bond_type = '#' THEN b.bond_id END)"))
 
+# Verbatim from the November 2025 dev file (q197 is identical in the 2024 release).
+_Q197 = "SELECT AVG(oxygen_count) FROM (SELECT T1.molecule_id, COUNT(T1.element) AS oxygen_count FROM atom AS T1 INNER JOIN bond AS T2 ON T1.molecule_id = T2.molecule_id  WHERE T2.bond_type = '-' AND T1.element = 'o'  GROUP BY T1.molecule_id) AS oxygen_counts"
+_Q205 = "WITH CarbonMolecules AS (\n    SELECT DISTINCT a.molecule_id\n    FROM atom AS a\n    WHERE a.element = 'c'\n),\nMoleculeStats AS (\n    SELECT \n        m.molecule_id,\n        m.label,\n        COUNT(DISTINCT a.atom_id) AS atom_count,\n        COUNT(DISTINCT b.bond_id) AS bond_count,\n        SUM(CASE WHEN a.element = 'c' THEN 1 ELSE 0 END) AS carbon_count,\n        SUM(CASE WHEN a.element = 'cl' THEN 1 ELSE 0 END) AS chlorine_count,\n        SUM(CASE WHEN b.bond_type = '=' THEN 1 ELSE 0 END) AS double_bond_count\n    FROM molecule m\n    JOIN atom a ON m.molecule_id = a.molecule_id\n    LEFT JOIN bond b ON m.molecule_id = b.molecule_id\n    WHERE m.molecule_id IN (SELECT molecule_id FROM CarbonMolecules)\n    GROUP BY m.molecule_id, m.label\n),\nRankedMolecules AS (\n    SELECT\n        molecule_id,\n        label,\n        atom_count,\n        bond_count,\n        carbon_count,\n        chlorine_count,\n        double_bond_count,\n        RANK() OVER (ORDER BY carbon_count DESC, atom_count DESC) AS carbon_rank\n    FROM MoleculeStats\n)\nSELECT \n    rm.molecule_id,\n    rm.label,\n    rm.atom_count,\n    rm.bond_count,\n    rm.carbon_count,\n    rm.chlorine_count,\n    rm.double_bond_count,\n    rm.carbon_rank,\n    (SELECT COUNT(DISTINCT c.atom_id2) \n     FROM connected c \n     JOIN atom a ON c.atom_id = a.atom_id \n     WHERE a.molecule_id = rm.molecule_id) AS connections_count\nFROM RankedMolecules rm\nORDER BY rm.carbon_rank, rm.molecule_id;"
+
+# Hand fix: count each oxygen atom once, not once per single bond of its molecule.
+_Q197_FIX = _Q197.replace("COUNT(T1.element) AS oxygen_count", "COUNT(DISTINCT T1.atom_id) AS oxygen_count")
+
+# Hand fix: count distinct atoms/bonds instead of joined rows (same pattern as q200).
+_Q205_FIX = (_Q205
+             .replace("SUM(CASE WHEN a.element = 'c' THEN 1 ELSE 0 END)",
+                      "COUNT(DISTINCT CASE WHEN a.element = 'c' THEN a.atom_id END)")
+             .replace("SUM(CASE WHEN a.element = 'cl' THEN 1 ELSE 0 END)",
+                      "COUNT(DISTINCT CASE WHEN a.element = 'cl' THEN a.atom_id END)")
+             .replace("SUM(CASE WHEN b.bond_type = '=' THEN 1 ELSE 0 END)",
+                      "COUNT(DISTINCT CASE WHEN b.bond_type = '=' THEN b.bond_id END)"))
+
 _Q89 = ("SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id "
         "WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'")
 
+# Current-release bugs first. Labels name every release whose answer key contains the query.
 PRESETS: list[dict[str, Any]] = [
-    {"id": "bird571", "db_id": "codebase_community", "sql": _Q571, "fix": None,
-     "label": "BIRD dev answer key, question 571 (2024 release)",
-     "question": "For user No. 24, how many times is the number of posts compared to votes?"},
-    {"id": "bird140", "db_id": "financial", "sql": _Q140, "fix": _Q140_FIX,
-     "label": "BIRD dev answer key, question 140 (November 2025 release)",
-     "question": "Financial profile of all accounts in the Pisek district: deposits, withdrawals, cards, loans."},
+    {"id": "bird197", "db_id": "toxicology", "sql": _Q197, "fix": _Q197_FIX,
+     "label": "BIRD dev answer key, question 197 (2024 and November 2025 releases)",
+     "question": "Calculate the average number of oxygen atoms in single-bonded molecules."},
     {"id": "bird200", "db_id": "toxicology", "sql": _Q200, "fix": _Q200_FIX,
      "label": "BIRD dev answer key, question 200 (November 2025 release)",
      "question": "Atom, carbon and triple-bond counts for carcinogenic molecules with triple bonds."},
+    {"id": "bird205", "db_id": "toxicology", "sql": _Q205, "fix": _Q205_FIX,
+     "label": "BIRD dev answer key, question 205 (November 2025 release)",
+     "question": "Atom, bond, carbon, chlorine and double-bond counts for molecules containing carbon, ranked by carbon."},
+    {"id": "bird140", "db_id": "financial", "sql": _Q140, "fix": _Q140_FIX,
+     "label": "BIRD dev answer key, question 140 (November 2025 release)",
+     "question": "Financial profile of all accounts in the Pisek district: deposits, withdrawals, cards, loans."},
+    {"id": "bird571", "db_id": "codebase_community", "sql": _Q571, "fix": None,
+     "label": "BIRD dev answer key, question 571 (2024 release; fixed in November 2025)",
+     "question": "For user No. 24, how many times is the number of posts compared to votes?"},
     {"id": "bird89", "db_id": "financial", "sql": _Q89, "fix": None,
-     "label": "BIRD dev answer key, question 89 (2024 release)",
+     "label": "BIRD dev answer key, question 89 (2024 and November 2025 releases)",
      "question": "How many accounts in East Bohemia chose statement issuance after each transaction?"},
 ]
 _BY_ID = {p["id"]: p for p in PRESETS}
@@ -341,6 +367,192 @@ def explain(sql: str, findings: list[dict[str, Any]]) -> tuple[str, list[dict[st
     return " ".join(sentences), merged
 
 
+# --- fan-out grid: the actual rows the JOIN pairs up, for the table screen ---------------------------------
+GRID_MAX = 12
+FANOUT_TIMEOUT_S = 8.0
+FANOUT_MAX_ROWS = 1_000_000  # joined rows fetched (keys only); larger joins get no grid
+
+
+def _qi(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _lit(v: Any) -> str:
+    return exp.convert(v).sql(dialect="sqlite")
+
+
+def _id_key(v: Any) -> tuple[int, Any]:
+    return (0, v) if isinstance(v, (int, float)) and not isinstance(v, bool) else (1, str(v))
+
+
+class _Scope:
+    """One SELECT scope's FROM/JOIN/WHERE, re-selected with key columns. SQL runs only through sqlexec.run
+    (read-only connection, authorizer, progress-handler timeout) against a shared deadline."""
+
+    def __init__(self, sel: exp.Select, path: str, deadline: float) -> None:
+        w = sel.root().args.get("with_")
+        self.with_sql = w.sql(dialect="sqlite") + " " if w is not None else ""
+        self.ctes = {c.alias_or_name.lower() for c in (w.expressions if w is not None else [])}
+        base = sel.copy()
+        for k in ("expressions", "group", "having", "order", "limit", "offset", "distinct", "with_"):
+            base.set(k, None)
+        self.base, self.path, self.deadline = base, path, deadline
+
+    def fetch(self, cols: list[str], where: str, cap: int) -> list[tuple[Any, ...]] | None:
+        """Rows of the joined scope (keys only); None if there are more than cap."""
+        left = self.deadline - time.time()
+        if left <= 0:
+            raise TimeoutError("timeout")
+        q = self.base.copy().select(*cols, dialect="sqlite", copy=False).where(where, dialect="sqlite", copy=False)
+        r = run(self.path, self.with_sql + q.sql(dialect="sqlite"), timeout_s=left, max_rows=cap + 1)
+        if r.error is not None or r.rows is None:
+            raise RuntimeError(r.error or "no rows")
+        return r.rows if len(r.rows) <= cap else None
+
+    def key(self, table: str, alias: str) -> tuple[str, str] | None:
+        """(SQL for one row's identity, its column name): the single-column primary key, else rowid."""
+        if table.lower() in self.ctes:
+            return None
+        kind = run(self.path, f"SELECT type, sql FROM sqlite_master WHERE name = {_lit(table)} COLLATE NOCASE", 2.0)
+        if not kind.rows or kind.rows[0][0] != "table":
+            return None
+        info = run(self.path, f"PRAGMA table_info({_qi(table)})", 2.0).rows or []
+        pk = [r[1] for r in sorted(info, key=lambda r: r[5]) if r[5] > 0]
+        if len(pk) == 1:
+            return f"{_qi(alias)}.{_qi(pk[0])}", pk[0]
+        if "WITHOUT ROWID" in (kind.rows[0][1] or "").upper():
+            return None
+        return f"{_qi(alias)}.rowid", "rowid"
+
+
+def _links(sel: exp.Select) -> list[set[tuple[str, str]]]:
+    """Equality classes of qualified columns from the scope's JOIN ... ON and WHERE (a.x = b.y)."""
+    parent: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def find(x: tuple[str, str]) -> tuple[str, str]:
+        while parent.setdefault(x, x) != x:
+            x = parent[x]
+        return x
+    conds = [j.args.get("on") for j in sel.args.get("joins") or []] + [sel.args.get("where")]
+    for c in conds:
+        for eq in (c.find_all(exp.EQ) if c is not None else []):
+            l, r = eq.this, eq.expression
+            if isinstance(l, exp.Column) and isinstance(r, exp.Column) and l.table and r.table:
+                parent[find((l.table.lower(), l.name))] = find((r.table.lower(), r.name))
+    classes: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for x in list(parent):
+        classes.setdefault(find(x), set()).add(x)
+    return list(classes.values())
+
+
+def _fanout_one(sel: exp.Select, pairs: list[tuple[str, str]], f: dict[str, Any], path: str,
+                deadline: float, prefer: Any = None) -> dict[str, Any] | None:
+    """Counted table (left) vs the joined table that repeats it most (right), with real key ids.
+    One query fetches the key of every joined row; the counts and the grid are computed from those rows.
+    link: the column the two tables are joined on (e.g. molecule_id); a sample is drawn from one value of it,
+    the headline row's value (prefer) when the left rows carry it, else the left row repeated most."""
+    sc = _Scope(sel, path, deadline)
+    la = f["alias"]
+    left_t = next((t for t, a in pairs if a == la), None)
+    lk = sc.key(left_t, la) if left_t else None
+    if lk is None:
+        return None
+    cands = [(t, a, k) for t, a in pairs if a != la and t != "(subquery)" for k in [sc.key(t, a)] if k is not None]
+    if not cands:
+        return None
+    classes = _links(sel)
+    link_of: list[str | None] = []
+    for _, a, _ in cands:
+        cls = next((c for c in classes if any(x[0] == la.lower() for x in c) and any(x[0] == a.lower() for x in c)), None)
+        link_of.append(sorted(x[1] for x in cls if x[0] == la.lower())[0] if cls else None)
+    link_cols = sorted({x for x in link_of if x})
+    got = sc.fetch([lk[0]] + [k[0] for _, _, k in cands] + [f"{_qi(la)}.{_qi(x)}" for x in link_cols],
+                   f"{lk[0]} IS NOT NULL", FANOUT_MAX_ROWS)
+    if got is None:
+        return None
+    nc = len(cands)
+    partners: list[dict[Any, set[Any]]] = [{} for _ in cands]
+    for row in got:
+        for i in range(nc):
+            s = partners[i].setdefault(row[0], set())
+            if row[1 + i] is not None:
+                s.add(row[1 + i])
+    mults = [max((len(s) for s in p.values()), default=0) for p in partners]
+    best = max(range(nc), key=lambda i: (mults[i], -i))
+    if mults[best] < 2:
+        return None
+    rt, ra, rk = cands[best]
+    part = partners[best]
+    link = link_of[best]
+    li = 1 + nc + link_cols.index(link) if link else None
+    group_of = {row[0]: row[li] for row in got} if li is not None else {}
+    n_left = len(part)
+    right_all = set().union(*part.values())
+    pair_n = Counter((row[0], row[1 + best]) for row in got if row[1 + best] is not None)
+    anchor, group = None, None
+    if n_left <= GRID_MAX and len(right_all) <= GRID_MAX:
+        rows = [a for a, s in part.items() if s]
+        cols = list(right_all)
+    else:  # deterministic sample around one left row: its right partners, the left rows sharing them
+        pool = [a for a in part if part[a]]
+        if prefer is not None and group_of:
+            pool = [a for a in pool if str(group_of.get(a)) == str(prefer)] or pool
+        anchor = min(pool, key=lambda a: (-len(part[a]), _id_key(a)))
+        cols = sorted(part[anchor], key=_id_key)[:GRID_MAX]
+        cs = set(cols)
+        rows = sorted((a for a, s in part.items() if s & cs),
+                      key=lambda a: (-len(part[a] & cs), _id_key(a)))[:GRID_MAX]
+        if group_of:
+            gv = group_of[anchor]
+            members = [a for a, v in group_of.items() if v == gv]
+            group = {"column": link, "value": _cell(gv), "left": len(members),
+                     "right": len(set().union(*(part[a] for a in members))),
+                     "joined_rows": sum(1 for row in got if row[li] == gv)}
+    rows, cols = sorted(rows, key=_id_key), sorted(cols, key=_id_key)
+    ci = {v: i for i, v in enumerate(cols)}
+    cells = [[r, ci[b], pair_n[(a, b)]] for r, a in enumerate(rows) for b in cols if (a, b) in pair_n]
+    return {
+        "left": {"table": left_t, "alias": la, "key": lk[1], "distinct": n_left},
+        "right": {"table": rt, "alias": ra, "key": rk[1], "distinct": len(right_all)},
+        "link": link, "joined_rows": len(got), "cross": len(got) == n_left * len(right_all),
+        "max_repeat": mults[best],
+        "grid": {"rows": [_cell(v) for v in rows], "cols": [_cell(v) for v in cols], "cells": cells,
+                 "sampled": len(rows) < n_left or len(cols) < len(right_all), "anchor": _cell(anchor),
+                 "group": group},
+    }
+
+
+def fanouts(path: str, sql: str, findings: list[dict[str, Any]], prefer: Any = None
+            ) -> tuple[list[dict[str, Any] | None], str | None]:
+    """Per finding: the two entities, their distinct key counts, the joined row count and up to 12 x 12 real
+    key ids (all pairs if both sides fit, else a deterministic sample). None where it cannot be computed."""
+    deadline = time.time() + FANOUT_TIMEOUT_S
+    scopes = _scopes(sql)
+    out: list[dict[str, Any] | None] = []
+    memo: dict[tuple[int, str], dict[str, Any] | None] = {}
+    err = None
+    for f in findings:
+        if f.get("table") in (None, "*") or "," in str(f.get("alias", "")):
+            out.append(None)
+            continue
+        hit = next(((i, s, p) for i, (s, p) in enumerate(scopes)
+                    if any(a == f["alias"] for _, a in p)
+                    and any(x.sql(dialect="sqlite") == f["aggregate"] and x.find_ancestor(exp.Select) is s
+                            for x in s.find_all(exp.AggFunc, exp.Anonymous))), None)
+        if hit is None:
+            out.append(None)
+            continue
+        key = (hit[0], f["alias"])
+        if key not in memo:
+            try:
+                memo[key] = _fanout_one(hit[1], hit[2], f, path, deadline, prefer)
+            except Exception as e:  # noqa: BLE001 - the grid is optional; the check still answers
+                memo[key] = None
+                err = f"{type(e).__name__}: {e}"
+        out.append(memo[key])
+    return out, err
+
+
 _VERBS = {"COUNT": "count", "SUM": "add up", "TOTAL": "add up", "AVG": "average over"}
 
 
@@ -351,7 +563,11 @@ def intended_note(sql: str, findings: list[dict[str, Any]], has_fix: bool) -> st
         return ""
     table, alias = f["table"], f["alias"]
     verb = _VERBS.get(str(f["aggregate"]).split("(", 1)[0].strip().upper(), "aggregate")
-    scope = next((p for _, p in _scopes(sql) if any(a == alias for _, a in p)), [])
+    scopes = _scopes(sql)
+    scope = next((p for s, p in scopes  # the scope that owns the aggregate, as in explain()
+                  if any(a == alias for _, a in p)
+                  and any(x.sql(dialect="sqlite") == f["aggregate"] and x.find_ancestor(exp.Select) is s
+                          for x in s.find_all(exp.AggFunc, exp.Anonymous))), None)         or next((p for _, p in scopes if any(a == alias for _, a in p)), [])
     others = list(dict.fromkeys(t for t, a in scope if a != alias and t != table))
     if not others:
         return ""
@@ -362,7 +578,7 @@ def intended_note(sql: str, findings: list[dict[str, Any]], has_fix: bool) -> st
 
 
 def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: float = CHECK_AUDIT_TIMEOUT_S,
-          original: dict[str, Any] | None = None) -> dict[str, Any]:
+          original: dict[str, Any] | None = None, grid: bool = False) -> dict[str, Any]:
     path = db_path(db_id)
     t0 = time.time()
     orig = original if original is not None else execute(path, sql)
@@ -377,6 +593,14 @@ def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: floa
     elif flagged and p and p.get("fix") and p["db_id"] == db_id and _norm_sql(p["sql"]) == _norm_sql(sql):
         corrected = {"sql": p["fix"], "source": "hand", **execute(path, p["fix"])}
     sentence, spans = explain(sql, a.findings) if flagged and a else ("", [])
+    findings = a.findings if a else []
+    fan_err, fan_s = None, None
+    head = headline(orig, corrected) if corrected and not corrected.get("error") else None
+    if grid and flagged and findings:
+        t1 = time.time()
+        fos, fan_err = fanouts(path, sql, findings, head.get("row") if head else None)
+        findings = [dict(f, fanout=fo) for f, fo in zip(findings, fos)]
+        fan_s = round(time.time() - t1, 4)
     try:
         sqlglot.parse_one(sql, read="sqlite")
         parse_error = None
@@ -386,14 +610,15 @@ def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: floa
         "db_id": db_id, "sql": sql,
         "parses": parse_error is None, "parse_error": parse_error,
         "audited": audited, "flagged": flagged,
-        "findings": a.findings if a else [], "message": a.message if a else "no JOIN + aggregate to audit",
+        "findings": findings, "message": a.message if a else "no JOIN + aggregate to audit",
         "audit_error": a.error if a else None,
         "explanation": sentence, "highlights": spans,
         "intended": intended_note(sql, a.findings, corrected is not None and not corrected.get("error"))
         if flagged and a else "",
         "original": orig, "corrected": corrected,
-        "headline": headline(orig, corrected) if corrected and not corrected.get("error") else None,
+        "headline": head,
         "audit_seconds": round(audit_s, 4),
+        "fanout_seconds": fan_s, "fanout_error": fan_err,
     }
 
 
@@ -435,7 +660,7 @@ async def api_check(body: CheckIn) -> Any:
         return JSONResponse({"error": f"unknown database: {body.db_id}"}, status_code=400)
     if not sql or len(sql) > MAX_SQL_CHARS:
         return JSONResponse({"error": f"SQL must be 1-{MAX_SQL_CHARS} characters"}, status_code=400)
-    out = await asyncio.to_thread(check, body.db_id, sql, body.preset)
+    out = await asyncio.to_thread(check, body.db_id, sql, body.preset, grid=True)
     p = _BY_ID.get(body.preset or "")
     for fn in check_listeners:
         try:
@@ -452,4 +677,5 @@ def api_presets() -> dict[str, Any]:
                         for p in PRESETS if p["db_id"] in known]}
 
 
-assert _Q140_FIX != _Q140 and _Q200_FIX.count("COUNT(DISTINCT CASE") == 3  # hand fixes applied
+assert _Q140_FIX != _Q140 and _Q197_FIX != _Q197  # hand fixes applied
+assert _Q200_FIX.count("COUNT(DISTINCT CASE") == 3 and _Q205_FIX.count("COUNT(DISTINCT CASE") == 3

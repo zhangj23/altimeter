@@ -195,6 +195,26 @@ body.cov #covcol { display: grid; animation: fade 300ms ease-out both; }
 .ph { opacity: 0; transform: translateY(0.4rem); transition: opacity 450ms ease-out, transform 450ms cubic-bezier(.22,.61,.36,1); }
 .ph.after { transform: translateX(-0.8rem); }
 .ph.on { opacity: 1; transform: none; }
+/* fan-out grid: one cell per joined row */
+.reveal.withfan { margin-bottom: 0.9rem; }
+.fan { display: grid; grid-template-columns: auto minmax(16rem, 1fr); align-items: end; gap: 0 2.6rem; margin: 0 0 1rem; }
+.fbox { min-width: 0; }
+.fcap { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--ink-2); }
+.fgrid { --ch: 2.2rem; display: grid; justify-content: start; gap: 2px; font-size: 0.68rem; font-variant-numeric: tabular-nums; }
+.fgrid .h { align-self: end; line-height: 1.2; justify-self: center; white-space: nowrap; color: var(--ink-2); }
+.fgrid .rh { align-self: center; line-height: 1; justify-self: end; padding-right: 0.5rem; white-space: nowrap; color: var(--ink-2); }
+.fgrid .slot { position: relative; height: var(--ch); border: 1px solid var(--paper-2); }
+.fgrid .c {
+  position: absolute; inset: -1px; display: flex; align-items: center; justify-content: center;
+  background: var(--diff); border: 1px solid var(--caution-ink); font-style: normal; font-weight: 600; color: var(--ink);
+  opacity: 0; transform: scale(0.6); transition: opacity 160ms ease-out, transform 160ms ease-out;
+}
+.fgrid .c.on { opacity: 1; transform: none; }
+.factor { min-width: 0; }
+.factor small { display: block; margin-bottom: 0.1rem; font-size: 1rem; font-weight: 600; color: var(--ink-2); }
+.factor b { display: block; font-size: 1.9rem; font-weight: 600; line-height: 1.15; color: var(--ask); font-variant-numeric: tabular-nums; }
+.factor b.long { font-size: 1.55rem; }
+.factor p { margin: 0.35rem 0 0; font-size: 0.9rem; color: var(--ink-2); max-width: 40ch; }
 .ck-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0 2.6rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
 .ck-body > div { min-width: 0; min-height: 0; overflow: hidden; }
 .sqlbox { display: grid; }
@@ -231,6 +251,7 @@ mark.join, .hkey .join::before { background: var(--joinbg); border-bottom: 2px s
 .why.t3 .evid, .why.t3 .fixline { font-size: 0.8rem; }
 .why.t3 .expl, .why.t3 .fixline { max-width: none; }
 .why.t3 > * + * { margin-top: 0.5rem; }
+.why.t4 .evid { display: none; } /* the fan-out grid and factor line carry the same counts */
 .fixline { font-size: 0.95rem; color: var(--ink-2); max-width: 52ch; }
 
 /* coverage */

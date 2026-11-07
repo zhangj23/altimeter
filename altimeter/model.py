@@ -80,6 +80,21 @@ class SqlModel:
             gen.pop()
         if not gen:  # degenerate: model stopped immediately
             gen = out[0, n_in : n_in + 1].tolist()
+        return self._features(ids, gen, gen_seconds)
+
+    @torch.no_grad()
+    def score_given(self, messages: list[dict[str, str]], sql: str, raw: str | None = None) -> Generation:
+        """Teacher-force someone else's SQL as this model's answer and return the same features generate() would.
+
+        The response text is the SQL inside the same ```sql fence the model emits (or `raw` verbatim), tokenized
+        without special tokens, so a model's own decoded output reproduces generate()'s features."""
+        ids = self.prompt_ids(messages)
+        text = raw if raw is not None else f"```sql\n{sql.strip()}\n```"
+        gen = self.tok(text, add_special_tokens=False).input_ids or [self.tok.eos_token_id]
+        return self._features(ids, gen, 0.0)
+
+    def _features(self, ids: torch.Tensor, gen: list[int], gen_seconds: float) -> Generation:
+        n_in = ids.shape[1]
         n_gen = len(gen)
         seq = torch.tensor([ids[0].tolist() + gen], device=self.device)
 

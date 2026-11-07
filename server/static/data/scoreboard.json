@@ -1,0 +1,559 @@
+{
+ "source_note": "Final probe run v1: 2,563 benchmark questions across 31 databases (BIRD dev + Spider dev). Grouped cross-validation by database; 95% CIs bootstrap resampled by database.",
+ "run": "~/runs/v1/probe_v1_results.json",
+ "selected": {
+  "position": "mean_gen",
+  "layer": 26,
+  "selected_on": "spider"
+ },
+ "subsets": {
+  "bird": {
+   "label": "BIRD (headline; not used for selection)",
+   "n": 1531,
+   "n_dbs": 11,
+   "accuracy": 0.3553
+  },
+  "spider": {
+   "label": "Spider (selection set, optimistic)",
+   "n": 1032,
+   "n_dbs": 20,
+   "accuracy": 0.6609
+  },
+  "bird_exec": {
+   "label": "BIRD, executable SQL only",
+   "n": 994,
+   "n_dbs": 11,
+   "accuracy": 0.5473
+  },
+  "pooled": {
+   "label": "pooled",
+   "n": 2563,
+   "n_dbs": 31,
+   "accuracy": 0.4783
+  }
+ },
+ "headline": {
+  "subset": "BIRD (headline; not used for selection)",
+  "n": 1531,
+  "metrics": [
+   {
+    "key": "stacked",
+    "results_key": "stacked",
+    "label": "Stacked needle (probe + log-probs + surface)",
+    "auroc": 0.9012,
+    "ci95": [
+     0.8812,
+     0.9233
+    ]
+   },
+   {
+    "key": "stack_without_probe",
+    "results_key": "stack_without_probe",
+    "label": "Same stack without the probe",
+    "auroc": 0.8959,
+    "ci95": [
+     0.8705,
+     0.9176
+    ]
+   },
+   {
+    "key": "surface_complexity",
+    "results_key": "surface_complexity",
+    "label": "Surface complexity (lengths, joins, aggregates)",
+    "auroc": 0.8494,
+    "ci95": [
+     0.813,
+     0.8818
+    ]
+   },
+   {
+    "key": "probe",
+    "results_key": "probe[mean_gen@26]",
+    "label": "Hidden-state probe alone",
+    "auroc": 0.7973,
+    "ci95": [
+     0.7567,
+     0.834
+    ]
+   },
+   {
+    "key": "logprob_mean",
+    "results_key": "logprob_mean",
+    "label": "Mean token log-prob",
+    "auroc": 0.7543,
+    "ci95": [
+     0.7194,
+     0.7931
+    ]
+   },
+   {
+    "key": "logprob_min",
+    "results_key": "logprob_min",
+    "label": "Min token log-prob",
+    "auroc": 0.7089,
+    "ci95": [
+     0.6646,
+     0.7578
+    ]
+   },
+   {
+    "key": "prompt_only_probe",
+    "results_key": "prompt_only_probe[last_prompt@34]",
+    "label": "Prompt-only probe (before any SQL)",
+    "auroc": 0.6815,
+    "ci95": [
+     0.6084,
+     0.761
+    ]
+   },
+   {
+    "key": "shuffled_label_control",
+    "results_key": "shuffled_label_control",
+    "label": "Shuffled-label control",
+    "auroc": 0.4654,
+    "ci95": [
+     0.441,
+     0.4966
+    ]
+   }
+  ],
+  "deltas": [
+   {
+    "key": "delta_probe_minus_logprob",
+    "label": "Probe minus mean log-prob",
+    "delta": 0.043,
+    "ci95": [
+     0.0014,
+     0.073
+    ],
+    "ci_excludes_0": true
+   },
+   {
+    "key": "delta_stacked_minus_stack_without_probe",
+    "label": "Stack with probe minus stack without",
+    "delta": 0.0053,
+    "ci95": [
+     -0.0016,
+     0.013
+    ],
+    "ci_excludes_0": false
+   }
+  ]
+ },
+ "calibration": {
+  "subset": "pooled",
+  "n": 2563,
+  "ece": 0.0213,
+  "reliability": [
+   {
+    "bin": [
+     0.0,
+     0.1
+    ],
+    "n": 691,
+    "mean_pred": 0.005,
+    "frac_correct": 0.009
+   },
+   {
+    "bin": [
+     0.1,
+     0.2
+    ],
+    "n": 82,
+    "mean_pred": 0.158,
+    "frac_correct": 0.146
+   },
+   {
+    "bin": [
+     0.2,
+     0.3
+    ],
+    "n": 113,
+    "mean_pred": 0.253,
+    "frac_correct": 0.292
+   },
+   {
+    "bin": [
+     0.3,
+     0.4
+    ],
+    "n": 180,
+    "mean_pred": 0.349,
+    "frac_correct": 0.367
+   },
+   {
+    "bin": [
+     0.4,
+     0.5
+    ],
+    "n": 192,
+    "mean_pred": 0.448,
+    "frac_correct": 0.5
+   },
+   {
+    "bin": [
+     0.5,
+     0.6
+    ],
+    "n": 174,
+    "mean_pred": 0.544,
+    "frac_correct": 0.552
+   },
+   {
+    "bin": [
+     0.6,
+     0.7
+    ],
+    "n": 176,
+    "mean_pred": 0.65,
+    "frac_correct": 0.653
+   },
+   {
+    "bin": [
+     0.7,
+     0.8
+    ],
+    "n": 241,
+    "mean_pred": 0.754,
+    "frac_correct": 0.697
+   },
+   {
+    "bin": [
+     0.8,
+     0.9
+    ],
+    "n": 422,
+    "mean_pred": 0.856,
+    "frac_correct": 0.879
+   },
+   {
+    "bin": [
+     0.9,
+     1.0
+    ],
+    "n": 292,
+    "mean_pred": 0.928,
+    "frac_correct": 0.901
+   }
+  ]
+ },
+ "bands": {
+  "pooled": {
+   "n": 2563,
+   "bands": [
+    {
+     "key": "ask",
+     "name": "Ask",
+     "from": 0.0,
+     "to": 0.5,
+     "n": 1258,
+     "share": 0.4908,
+     "wrong": 1045,
+     "pct_wrong": 0.8307,
+     "pct_wrong_ci95": [
+      0.809,
+      0.8504
+     ]
+    },
+    {
+     "key": "caution",
+     "name": "Caution",
+     "from": 0.5,
+     "to": 0.8,
+     "n": 591,
+     "share": 0.2306,
+     "wrong": 212,
+     "pct_wrong": 0.3587,
+     "pct_wrong_ci95": [
+      0.3211,
+      0.3982
+     ]
+    },
+    {
+     "key": "cruise",
+     "name": "Cruise",
+     "from": 0.8,
+     "to": 1.0,
+     "n": 714,
+     "share": 0.2786,
+     "wrong": 80,
+     "pct_wrong": 0.112,
+     "pct_wrong_ci95": [
+      0.091,
+      0.1373
+     ]
+    }
+   ],
+   "at_cruise": {
+    "threshold": 0.8,
+    "n": 714,
+    "coverage": 0.2786,
+    "accuracy": 0.888,
+    "accuracy_ci95": [
+     0.8627,
+     0.909
+    ],
+    "answer_all_accuracy": 0.4783
+   }
+  },
+  "bird": {
+   "n": 1531,
+   "bands": [
+    {
+     "key": "ask",
+     "name": "Ask",
+     "from": 0.0,
+     "to": 0.5,
+     "n": 963,
+     "share": 0.629,
+     "wrong": 834,
+     "pct_wrong": 0.866,
+     "pct_wrong_ci95": [
+      0.8431,
+      0.8861
+     ]
+    },
+    {
+     "key": "caution",
+     "name": "Caution",
+     "from": 0.5,
+     "to": 0.8,
+     "n": 348,
+     "share": 0.2273,
+     "wrong": 120,
+     "pct_wrong": 0.3448,
+     "pct_wrong_ci95": [
+      0.2968,
+      0.3962
+     ]
+    },
+    {
+     "key": "cruise",
+     "name": "Cruise",
+     "from": 0.8,
+     "to": 1.0,
+     "n": 220,
+     "share": 0.1437,
+     "wrong": 33,
+     "pct_wrong": 0.15,
+     "pct_wrong_ci95": [
+      0.1088,
+      0.2032
+     ]
+    }
+   ],
+   "at_cruise": {
+    "threshold": 0.8,
+    "n": 220,
+    "coverage": 0.1437,
+    "accuracy": 0.85,
+    "accuracy_ci95": [
+     0.7968,
+     0.8912
+    ],
+    "answer_all_accuracy": 0.3553
+   }
+  },
+  "spider": {
+   "n": 1032,
+   "bands": [
+    {
+     "key": "ask",
+     "name": "Ask",
+     "from": 0.0,
+     "to": 0.5,
+     "n": 295,
+     "share": 0.2859,
+     "wrong": 211,
+     "pct_wrong": 0.7153,
+     "pct_wrong_ci95": [
+      0.6612,
+      0.7637
+     ]
+    },
+    {
+     "key": "caution",
+     "name": "Caution",
+     "from": 0.5,
+     "to": 0.8,
+     "n": 243,
+     "share": 0.2355,
+     "wrong": 92,
+     "pct_wrong": 0.3786,
+     "pct_wrong_ci95": [
+      0.32,
+      0.441
+     ]
+    },
+    {
+     "key": "cruise",
+     "name": "Cruise",
+     "from": 0.8,
+     "to": 1.0,
+     "n": 494,
+     "share": 0.4787,
+     "wrong": 47,
+     "pct_wrong": 0.0951,
+     "pct_wrong_ci95": [
+      0.0723,
+      0.1242
+     ]
+    }
+   ],
+   "at_cruise": {
+    "threshold": 0.8,
+    "n": 494,
+    "coverage": 0.4787,
+    "accuracy": 0.9049,
+    "accuracy_ci95": [
+     0.8758,
+     0.9277
+    ],
+    "answer_all_accuracy": 0.6609
+   }
+  }
+ },
+ "layer_curve": {
+  "label": "Spider selection set (used to choose the layer; optimistic)",
+  "position": "mean_gen",
+  "selected_layer": 26,
+  "n": 1032,
+  "points": [
+   {
+    "layer": 0,
+    "auroc": 0.6623
+   },
+   {
+    "layer": 2,
+    "auroc": 0.642
+   },
+   {
+    "layer": 4,
+    "auroc": 0.6628
+   },
+   {
+    "layer": 6,
+    "auroc": 0.6668
+   },
+   {
+    "layer": 8,
+    "auroc": 0.659
+   },
+   {
+    "layer": 10,
+    "auroc": 0.6824
+   },
+   {
+    "layer": 12,
+    "auroc": 0.7002
+   },
+   {
+    "layer": 14,
+    "auroc": 0.7184
+   },
+   {
+    "layer": 16,
+    "auroc": 0.7221
+   },
+   {
+    "layer": 18,
+    "auroc": 0.7334
+   },
+   {
+    "layer": 20,
+    "auroc": 0.7464
+   },
+   {
+    "layer": 22,
+    "auroc": 0.762
+   },
+   {
+    "layer": 24,
+    "auroc": 0.7726
+   },
+   {
+    "layer": 26,
+    "auroc": 0.7944
+   },
+   {
+    "layer": 28,
+    "auroc": 0.7745
+   },
+   {
+    "layer": 30,
+    "auroc": 0.7843
+   },
+   {
+    "layer": 32,
+    "auroc": 0.7866
+   },
+   {
+    "layer": 34,
+    "auroc": 0.7632
+   },
+   {
+    "layer": 36,
+    "auroc": 0.7457
+   }
+  ]
+ },
+ "negatives": [
+  {
+   "name": "Needle on Gemini-written SQL",
+   "test": "Does the needle transfer to SQL written by another model?",
+   "measured": "AUROC 0.581",
+   "bar": "AUROC >= 0.70",
+   "value": 0.581,
+   "threshold": 0.7,
+   "n": 79,
+   "passed": false,
+   "source": "Pre-registered test, Nov 7: needle scored on Gemini Flash SQL for 79 held-out BIRD questions (57 right, 22 wrong; the rule also needed >= 40 wrong). ~/runs/cloudgrade/gemini_scored.jsonl."
+  },
+  {
+   "name": "Steering honesty dial",
+   "test": "Does adding an honest-minus-sycophantic steering vector (layer 16) move the rate of agreeing with a false claim by at least 40 points while staying coherent?",
+   "measured": "AGREE rate moved 25 points",
+   "bar": ">= 40 points",
+   "value": 25,
+   "threshold": 40,
+   "n": 140,
+   "passed": false,
+   "source": "Pre-registered test, Nov 7, run on the RTX 3060: 20 held-out prompts x 7 steering strengths, blind-rated. AGREE 45% at -12 to 20% at +12; coherence 100% throughout. Files in C:\\hack\\steer on that machine."
+  },
+  {
+   "name": "Caving polygraph",
+   "test": "Does a probe separate CAVED from PERSUADED answers after pushback?",
+   "measured": "AUROC 0.800 [0.751, 0.850]",
+   "bar": "AUROC >= 0.85",
+   "value": 0.8,
+   "ci": [
+    0.751,
+    0.85
+   ],
+   "threshold": 0.85,
+   "n": 436,
+   "passed": false,
+   "source": "~/runs/analyze_main_u.txt: nested leave-one-topic-out AUROC on PopQA, CAVED n=101 vs PERSUADED n=335; CI by topic bootstrap."
+  },
+  {
+   "name": "Needle finds answer-key errors",
+   "test": "Are answer-key (gold SQL) errors more common among wrong answers the needle was confident about than among random wrong answers?",
+   "measured": "4/40 vs 4/40",
+   "bar": "confident group has more answer-key errors (one-sided Fisher p < 0.05)",
+   "value": {
+    "confident": [
+     4,
+     40
+    ],
+    "random": [
+     4,
+     40
+    ],
+    "fisher_p_one_sided": 0.644
+   },
+   "n": 80,
+   "passed": false,
+   "source": "~/runs/redpen/verdicts.jsonl: 80 hand-audited cases, 8 judged GOLD_WRONG or BOTH_WRONG; one-sided Fisher exact p = 0.64."
+  }
+ ]
+}
