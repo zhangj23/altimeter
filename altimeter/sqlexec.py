@@ -15,11 +15,32 @@ class ExecResult:
     timed_out: bool = False
 
 
+SAFE_PRAGMAS = {"table_info", "table_xinfo", "foreign_key_list", "index_list", "index_info", "index_xinfo"}
+
+
+def _authorizer(action: int, arg1: str | None, arg2: str | None, db: str | None, src: str | None) -> int:
+    """Untrusted SQL guard (pasted queries, model output): read-only DB already blocks writes; this also blocks
+    ATTACH/DETACH (opening other files), load_extension, and any PRAGMA outside a read-only whitelist."""
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and (arg1 or "").lower() not in SAFE_PRAGMAS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_FUNCTION and (arg2 or "").lower() == "load_extension":
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def connect_guarded(db_path: str) -> sqlite3.Connection:
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    con.set_authorizer(_authorizer)
+    return con
+
+
 def run(db_path: str, sql: str, timeout_s: float = 10.0, max_rows: int | None = None) -> ExecResult:
     t0 = time.time()
     if not sql.strip():
         return ExecResult(None, "empty SQL", 0.0)
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    con = connect_guarded(db_path)
     deadline = t0 + timeout_s
     con.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10_000)
     try:
@@ -40,7 +61,7 @@ def compiles(db_path: str, sql: str) -> bool:
     if not sql.strip():
         return False
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        con = connect_guarded(db_path)
     except sqlite3.Error:
         return False
     try:

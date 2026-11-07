@@ -177,6 +177,19 @@ function diffSegments(sql, other) {
   return segs;
 }
 
+/* SQL with server-provided character spans marked: [{start, end, kind: "aggregate"|"join"}]. */
+function hlBlock(sql, spans) {
+  const pre = el("pre", "sql");
+  let at = 0;
+  for (const s of [...(spans || [])].sort((a, b) => a.start - b.start)) {
+    if (s.start < at || s.end > sql.length) continue;
+    pre.append(document.createTextNode(sql.slice(at, s.start)), el("mark", "hl-" + s.kind, sql.slice(s.start, s.end)));
+    at = s.end;
+  }
+  pre.append(document.createTextNode(sql.slice(at)));
+  return pre;
+}
+
 function sqlBlock(sql, other) {
   const pre = el("pre", "sql");
   if (!sql) { pre.textContent = "(no SQL generated)"; return pre; }
@@ -241,7 +254,7 @@ function renderPass(r) {
   if (!greedyShown) {
     const body = el("section", "perf");
     if (hasReadings) body.append(el("p", "tag", "Greedy SQL"));
-    body.append(sqlBlock(r.sql, null));
+    body.append(r.audit && r.audit.flagged && r.sql ? hlBlock(r.sql, r.audit.highlights) : sqlBlock(r.sql, null));
     if (r.error) {
       body.append(el("p", "err", r.error));
     } else if (r.rows) {
@@ -251,6 +264,7 @@ function renderPass(r) {
     pass.append(body);
   }
   if (hasReadings) pass.append(renderReadings(r));
+  if (r.audit && r.audit.flagged) pass.append(renderAudit(r.audit));
 
   const foot = el("section", "perf");
   const dl = el("dl", "facts");
@@ -261,6 +275,7 @@ function renderPass(r) {
     ["Execution", fmtSeconds(r.exec_seconds)],
   ];
   if (hasReadings && r.readings_seconds != null) facts.push(["Readings", fmtSeconds(r.readings_seconds)]);
+  if (r.audit) facts.push(["Fan-out check", auditFact(r.audit)]);
   facts.push(["Tokens", r.n_prompt ? `${r.n_prompt} in · ${r.n_gen} out` : "n/a"], ["Sent", "0 bytes · local"]);
   for (const [k, v] of facts) {
     const pair = el("div");
@@ -357,6 +372,214 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") { retryMs = 500; connect(); }
 });
 
+/* ---------- pre-flight check (fan-out audit) ---------- */
+// mock.js replaces this to serve fixtures; otherwise it is plain fetch returning {ok, status, data}.
+let apiCall = async (url, body) => {
+  const r = await fetch(url, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store" } : { cache: "no-store" });
+  return { ok: r.ok, status: r.status, data: await r.json() };
+};
+let presets = [];
+let activePreset = null;
+let checking = null; // {t0, timer}
+
+function fmtFactor(x) {
+  const n = Number(x);
+  return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toPrecision(3);
+}
+
+function auditFact(a) {
+  if (a.flagged) return `Flagged · ${fmtFactor(a.findings[0].factor)}× rows`;
+  if (!a.audited) return "No JOIN + aggregate";
+  return a.audit_error ? "Incomplete" : "Clear";
+}
+
+/* Struck as-written figure, corrected figure, and how far off it was. Animates once when attached. */
+function ledger(h, source) {
+  const box = el("div", "ledger");
+  if (Math.max(h.before_text.length, h.after_text.length) > 6) box.classList.add("long");
+  const was = el("div", "col");
+  was.append(el("span", "lab", "As written"), el("span", "fig was", h.before_text));
+  const now = el("div", "col");
+  now.append(el("span", "lab", source === "auditor" ? "Deduplicated" : "Corrected"), el("span", "fig now", h.after_text));
+  box.append(was, now);
+  if (h.ratio != null && h.ratio !== 1) {
+    const hi = h.ratio > 1;
+    box.append(el("span", "times", `${fmtFactor(hi ? h.ratio : 1 / h.ratio)}× too ${hi ? "high" : "low"}`));
+  }
+  box.append(el("span", "what", h.row ? `${h.column} for ${h.row}` : h.column));
+  requestAnimationFrame(() => requestAnimationFrame(() => box.classList.add("go")));
+  return box;
+}
+
+function rewriteBlock(c) {
+  const det = el("details", "rewrite");
+  det.append(el("summary", null, c.source === "auditor" ? "Suggested rewrite (auditor)" : "Corrected query (written by hand, verified by direct counts)"));
+  det.append(sqlBlock(c.sql, null));
+  if (c.error) det.append(el("p", "err", c.error));
+  else if (c.rows) {
+    if (c.rows.length) det.append(resultTable(c.columns, c.rows, 5));
+    det.append(el("p", "count", rowCount(c.rows.length, c.rows_capped, 5)));
+  }
+  return det;
+}
+
+/* Audit block inside an Ask answer (only when flagged). */
+function renderAudit(a) {
+  const sec = el("section", "perf audit");
+  sec.append(el("h2", null, "Double counting"));
+  if (a.headline && a.corrected) sec.append(ledger(a.headline, a.corrected.source));
+  sec.append(el("p", "explain", a.explanation || a.message));
+  if (a.corrected) sec.append(rewriteBlock(a.corrected));
+  else sec.append(el("p", "note", "No automatic rewrite for this query shape."));
+  return sec;
+}
+
+function checklist(items) {
+  const ol = el("ol", "checklist");
+  for (const [ch, re, cls] of items) {
+    const li = el("li");
+    li.append(el("span", "ch", ch), el("span", "dots"), el("span", "re" + (cls ? " " + cls : ""), re));
+    ol.append(li);
+  }
+  return ol;
+}
+
+function renderCheck(d) {
+  const o = d.original || {};
+  const sheet = el("article", "sheet");
+  let kind, title, sub;
+  if (o.error) { kind = "error"; title = "Query does not run"; sub = o.error; }
+  else if (d.flagged) { kind = "flagged"; title = "Double counting"; sub = d.db_id; }
+  else if (!d.audited) { kind = "clear"; title = "Nothing to audit"; sub = "No JOIN with SUM, AVG or COUNT. This check looks only for double counting."; }
+  else if (d.audit_error) { kind = "error"; title = "Audit incomplete"; sub = d.audit_error; }
+  else { kind = "clear"; title = "No double counting found"; sub = "The JOINs do not repeat any counted row. Other mistakes are not checked here."; }
+  const top = el("section", "v-" + kind);
+  const vh = el("div", "verdict");
+  vh.append(el("h3", null, title), el("p", null, sub));
+  top.append(vh);
+  if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline, d.corrected.source));
+  if (d.flagged) top.append(el("p", "explain", d.explanation || d.message));
+  sheet.append(top);
+
+  const items = [];
+  const nrows = o.rows ? o.rows.length : 0;
+  items.push([`Runs on ${d.db_id}`, o.error ? "No" : `${rowCount(nrows, o.rows_capped, nrows)} · ${fmtSeconds(o.seconds)}`, o.error ? "bad" : null]);
+  if (!o.error) items.push(["JOIN with SUM, AVG or COUNT", d.audited ? "Present" : "None", null]);
+  if (d.audited) {
+    const f = d.findings[0];
+    items.push(["Rows repeated by the JOIN", d.flagged ? `${fmtFactor(f.factor)}× ${f.table === "*" ? "all tables" : f.table}` : d.audit_error ? "Not measured" : "None",
+      d.flagged ? "bad" : d.audit_error ? null : "ok"]);
+  }
+  if (d.flagged) {
+    const c = d.corrected;
+    items.push(["Corrected query", !c ? "None for this shape" : c.error ? "Fails" : c.source === "auditor" ? "Auditor rewrite runs" : "Hand fix runs",
+      c && !c.error ? "ok" : null]);
+  }
+  items.push(["Check time", fmtSeconds(d.audit_seconds), null]);
+  const cl = el("section", "perf");
+  cl.append(checklist(items));
+  sheet.append(cl);
+
+  const body = el("section", "perf");
+  body.append(el("p", "tag", "SQL as written"));
+  body.append(d.flagged ? hlBlock(d.sql, d.highlights) : sqlBlock(d.sql, null));
+  if (d.flagged && d.highlights && d.highlights.length) {
+    body.append(el("p", "note", "Red: the aggregate that counts repeated rows. Yellow: the JOINs in the same query block."));
+  }
+  if (!o.error && o.rows) {
+    if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
+    body.append(el("p", "count", rowCount(o.rows.length, o.rows_capped, 5)));
+  }
+  if (d.flagged && d.corrected) body.append(rewriteBlock(d.corrected));
+  sheet.append(body);
+  $("checkOut").replaceChildren(sheet);
+}
+
+function renderPresets() {
+  const ul = $("presets");
+  ul.replaceChildren(...presets.map((p) => {
+    const li = el("li");
+    const b = el("button");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(activePreset === p.id));
+    b.append(el("span", "pq", p.question), el("span", "ps", p.label), el("span", "pd", p.db_id));
+    b.addEventListener("click", () => {
+      activePreset = p.id;
+      $("checkDb").value = p.db_id;
+      $("sql").value = p.sql;
+      renderPresets();
+      $("checkOut").replaceChildren();
+      $("checkStatus").textContent = "";
+      $("run").scrollIntoView({ block: "end", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    });
+    li.append(b);
+    return li;
+  }));
+  $("presetsHead").hidden = !presets.length;
+}
+
+async function loadPresets() {
+  try {
+    const r = await apiCall("/api/presets");
+    presets = r.data.presets || [];
+    renderPresets();
+  } catch { presets = []; renderPresets(); }
+}
+
+function checkBusy(on) {
+  $("run").disabled = on;
+  $("run").textContent = on ? "Checking" : "Run pre-flight check";
+  if (checking) clearInterval(checking.timer);
+  checking = null;
+  if (on) {
+    checking = { t0: performance.now() };
+    const draw = () => { $("checkStatus").textContent = `Running the query and the fan-out audit · ${((performance.now() - checking.t0) / 1000).toFixed(1)} s`; };
+    draw();
+    checking.timer = setInterval(draw, 100);
+  }
+}
+
+async function runCheck(e) {
+  e.preventDefault();
+  const sql = $("sql").value.trim();
+  const db_id = $("checkDb").value;
+  if (!sql || !db_id || checking) return;
+  const p = presets.find((x) => x.id === activePreset);
+  const body = { db_id, sql };
+  if (p && p.db_id === db_id) body.preset = p.id;
+  checkBusy(true);
+  const t0 = performance.now();
+  try {
+    const r = await apiCall("/api/check", body);
+    checkBusy(false);
+    if (!r.ok) { $("checkStatus").textContent = r.data.error || `Check failed (HTTP ${r.status}).`; $("checkOut").replaceChildren(); return; }
+    $("checkStatus").textContent = `Checked in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    renderCheck(r.data);
+    const d = r.data;
+    announce(d.flagged ? `Double counting. ${d.explanation}` + (d.headline ? ` ${d.headline.before_text} becomes ${d.headline.after_text}.` : "")
+      : d.original && d.original.error ? "The query does not run." : "No double counting found.");
+  } catch {
+    checkBusy(false);
+    $("checkStatus").textContent = "No link to the laptop. Check again when it reconnects.";
+  }
+}
+
+function setMode(mode) {
+  const check = mode === "check";
+  document.body.classList.toggle("check", check);
+  $("tabAsk").setAttribute("aria-selected", String(!check));
+  $("tabCheck").setAttribute("aria-selected", String(check));
+  history.replaceState(null, "", location.pathname + location.search + (check ? "#check" : ""));
+}
+
+$("tabAsk").addEventListener("click", () => setMode("ask"));
+$("tabCheck").addEventListener("click", () => setMode("check"));
+$("checkForm").addEventListener("submit", runCheck);
+$("sql").addEventListener("input", () => {
+  const p = presets.find((x) => x.id === activePreset);
+  if (p && normSql($("sql").value) !== normSql(p.sql)) { activePreset = null; renderPresets(); }
+});
+
 /* ---------- form ---------- */
 function fillDbs(dbs) {
   const sel = $("db");
@@ -364,6 +587,8 @@ function fillDbs(dbs) {
   const saved = (() => { try { return localStorage.getItem("altimeter.db"); } catch { return null; } })();
   if (saved && dbs.includes(saved)) sel.value = saved;
   else if (dbs.includes("formula_1")) sel.value = "formula_1";
+  $("checkDb").replaceChildren(...dbs.map((d) => { const o = el("option", null, d); o.value = d; return o; }));
+  $("checkDb").value = dbs.includes("codebase_community") ? "codebase_community" : sel.value;
 }
 
 async function loadDbs() {
@@ -397,11 +622,13 @@ $("question").addEventListener("keydown", (e) => {
 
 buildTape();
 setGauge(null);
+setMode(location.hash === "#check" ? "check" : "ask");
 if (MOCK) {
   const s = document.createElement("script");
   s.src = "mock.js";
   document.body.append(s);
 } else {
   loadDbs();
+  loadPresets();
   connect();
 }

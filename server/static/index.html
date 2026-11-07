@@ -164,7 +164,100 @@ dl.facts dd { margin: 0; font-variant-numeric: tabular-nums; }
 .reading.dropped .rhead { margin-bottom: 0; }
 .reading.dropped .rbody { display: none; }
 
+/* mode tabs sit on the header rule */
+.modes { display: flex; gap: 22px; margin-top: -2px; }
+.modes button {
+  padding: 10px 0 8px; border: 0; border-top: 3px solid transparent; background: none;
+  font-size: var(--t0); font-weight: 600; color: var(--ink-2); cursor: pointer;
+}
+.modes button[aria-selected="true"] { border-top-color: var(--ink); color: var(--ink); }
+body.check .instrument, body.check #status, body.check #form, body.check #passes { display: none; }
+#check { display: none; }
+body.check #check { display: block; }
+
+/* pre-flight check: form */
+#check h2 { margin: 26px 0 8px; font-size: var(--t1); font-weight: 600; }
+.presets { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.presets li { border-bottom: 1px solid var(--rule); }
+.presets button {
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; width: 100%; padding: 10px 0 10px 12px;
+  border: 0; border-left: 3px solid transparent; background: none; text-align: left; cursor: pointer;
+}
+.presets button[aria-pressed="true"] { border-left-color: var(--ink); background: var(--paper-2); }
+.presets .pq { grid-column: 1; font-size: var(--t0); font-weight: 500; }
+.presets .ps { grid-column: 1; font-size: 12.5px; color: var(--ink-2); }
+.presets .pd { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: 12.5px; color: var(--ink-2); }
+#checkForm { margin-top: 22px; padding-top: 0; border-top: 0; }
+details.rewrite { margin-top: 12px; }
+#sql { min-height: 150px; font: 14px/1.5 var(--mono); white-space: pre; overflow-x: auto; }
+#run {
+  margin-top: 12px; padding: 12px 26px; border: 0; border-radius: 4px;
+  background: var(--accent); color: var(--accent-ink); font-size: var(--t1); font-weight: 600; cursor: pointer;
+}
+#run:active { transform: translateY(1px); }
+#run:disabled { background: var(--ink-2); cursor: default; }
+#checkStatus { margin: 10px 0 0; min-height: 1.45em; font-size: var(--t0); font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* pre-flight check: result sheet */
+.sheet { margin-top: 26px; border: 1.5px solid var(--ink); border-radius: 6px; background: var(--sheet); animation: arrive 260ms ease-out both; }
+.sheet > section { padding: 14px 16px; }
+.verdict { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.verdict h3 { margin: 0; font-size: var(--t3); font-weight: 600; line-height: 1.1; }
+.verdict p { margin: 0; font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
+.v-flagged h3 { color: var(--ask); }
+.v-clear h3 { color: var(--cruise); }
+.v-error h3 { color: var(--ask); }
+
+/* the correction: as-written figure struck through, corrected figure entered beside it */
+.ledger { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 22px; margin-top: 18px; }
+.ledger .col { display: flex; flex-direction: column; gap: 4px; }
+.ledger .lab { font-size: var(--t0); font-weight: 600; color: var(--ink-2); }
+.ledger .fig { font-size: var(--t5); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger.long .fig { font-size: var(--t4); }
+.ledger .was { position: relative; align-self: flex-start; color: var(--ink-2); }
+.ledger .was::after {
+  content: ""; position: absolute; left: -4px; right: -4px; top: 52%; height: 4px; background: var(--ask);
+  transform: scaleX(0); transform-origin: left center;
+}
+.ledger.go .was::after { animation: strike 380ms cubic-bezier(.5,0,.2,1) 420ms forwards; }
+.ledger .now { opacity: 0; transform: translateY(14px); }
+.ledger.go .now { animation: enter 420ms cubic-bezier(.22,.61,.36,1) 840ms forwards; }
+.ledger .times { padding-bottom: 4px; font-size: var(--t2); font-weight: 600; color: var(--ask); opacity: 0; }
+.ledger.go .times { animation: show 300ms ease-out 1180ms forwards; }
+.ledger .what { flex-basis: 100%; min-width: 0; font: 13px/1.4 var(--mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes strike { to { transform: scaleX(1); } }
+@keyframes enter { to { opacity: 1; transform: none; } }
+@keyframes show { to { opacity: 1; } }
+@media (max-width: 479px) {
+  .ledger { gap: 8px 16px; }
+  .ledger .fig { font-size: var(--t4); }
+  .ledger.long .fig { font-size: var(--t3); }
+  .ledger .times { flex-basis: 100%; padding-bottom: 0; font-size: var(--t1); }
+}
+.explain { margin: 14px 0 0; max-width: 60ch; }
+
+/* challenge and response, as on a printed checklist */
+ol.checklist { margin: 0; padding: 0; list-style: none; font-size: var(--t0); }
+ol.checklist li { display: flex; align-items: baseline; gap: 6px; padding: 4px 0; }
+ol.checklist .ch { flex: none; }
+ol.checklist .dots { flex: 1; min-width: 16px; border-bottom: 2px dotted var(--rule); transform: translateY(-4px); }
+ol.checklist .re { flex: none; max-width: 60%; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+ol.checklist .re.bad { color: var(--ask); }
+ol.checklist .re.ok { color: var(--cruise); }
+pre.sql mark.hl-aggregate { background: none; color: var(--ask); font-weight: 700; border-bottom: 2px solid var(--ask); }
+pre.sql mark.hl-join { background: var(--diff); border-bottom: 2px solid var(--caution-ink); }
+details.rewrite summary { font-size: var(--t0); font-weight: 600; cursor: pointer; padding: 2px 0; }
+details.rewrite[open] summary { margin-bottom: 8px; }
+.note { font-size: var(--t0); color: var(--ink-2); margin: 8px 0 0; }
+
+/* audit block inside an answer's boarding pass */
+.audit h2 { margin: 0 0 2px; font-size: var(--t1); font-weight: 600; color: var(--ask); }
+.audit .ledger .fig { font-size: var(--t4); }
+.audit .ledger.long .fig { font-size: var(--t3); }
+
 @media (prefers-reduced-motion: reduce) {
+  .ledger .was::after { transform: scaleX(1); }
+  .ledger .now, .ledger .times { opacity: 1; transform: none; }
   *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-delay: 0s !important; }
 }
 </style>
@@ -176,6 +269,10 @@ dl.facts dd { margin: 0; font-variant-numeric: tabular-nums; }
     <h1>Altimeter</h1>
     <span id="link">Connecting</span>
   </header>
+  <nav class="modes" role="tablist" aria-label="Mode">
+    <button type="button" role="tab" id="tabAsk" aria-selected="true" aria-controls="form">Ask a question</button>
+    <button type="button" role="tab" id="tabCheck" aria-selected="false" aria-controls="check">Check a query</button>
+  </nav>
 
   <div class="instrument" role="group" aria-label="Confidence">
     <div class="readout"><span id="value">--</span><small id="band">No reading</small></div>
@@ -198,6 +295,20 @@ dl.facts dd { margin: 0; font-variant-numeric: tabular-nums; }
   </form>
 
   <div id="passes"></div>
+
+  <div id="check" role="tabpanel" aria-labelledby="tabCheck">
+    <h2 id="presetsHead">A colleague's query</h2>
+    <ul class="presets" id="presets" aria-labelledby="presetsHead"></ul>
+    <form id="checkForm" autocomplete="off">
+      <label for="checkDb">Database</label>
+      <select id="checkDb"></select>
+      <label for="sql">SQL</label>
+      <textarea id="sql" rows="6" spellcheck="false" autocapitalize="off" autocorrect="off" required></textarea>
+      <button id="run" type="submit">Run pre-flight check</button>
+      <p id="checkStatus" aria-live="polite"></p>
+    </form>
+    <div id="checkOut"></div>
+  </div>
 </main>
 <script src="app.js"></script>
 </body>

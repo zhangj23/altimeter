@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .preflight import annotate, router as preflight_router
 from .worker import WorkerClient, list_dbs
 
 STATIC = Path(__file__).parent / "static"
@@ -93,6 +94,7 @@ class Gateway:
             await self.broadcast(job, {"type": "working"})
             try:
                 res = await asyncio.to_thread(self.worker.ask, job.db_id, job.question)
+                res = await asyncio.to_thread(annotate, res)  # pre-flight fan-out audit of the model's SQL
                 await self.send(job, {"type": "result", **res})
                 self.current = None
                 await self.broadcast(job, {"type": "result", **res})
@@ -117,6 +119,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(preflight_router)
 
 
 @app.middleware("http")
