@@ -54,7 +54,38 @@ def list_dbs() -> list[str]:
 
 
 def db_path(db_id: str) -> str:
+    if db_id.startswith("upload:"):  # in-memory upload (server/uploads.py): read-only memdb URI, no file
+        from . import uploads
+
+        return uploads.db_path(db_id)
     return str(DB_ROOT / db_id / f"{db_id}.sqlite")
+
+
+def known_db(db_id: str) -> bool:
+    """A BIRD db on disk, or a live upload (gateway process only; touching an upload keeps it alive)."""
+    if db_id.startswith("upload:"):
+        from .uploads import STORE
+
+        return STORE.touch(db_id)
+    return db_id in list_dbs()
+
+
+_UPLOADS: dict[str, sqlite3.Connection] = {}  # worker process: upload id -> anchor of its memdb copy
+
+
+def _sync_uploads(req: dict[str, Any]) -> None:
+    """Worker side: drop uploads the gateway no longer holds, and load the one this request ships."""
+    from . import uploads
+
+    live = req.get("uploads_live")
+    if live is not None:
+        for uid in [u for u in _UPLOADS if u not in live]:
+            _UPLOADS.pop(uid).close()
+    up = req.get("upload")
+    if up and up["id"] not in _UPLOADS:
+        if "tables_sql" not in up:
+            raise RuntimeError("upload not loaded in the model worker; ask again")
+        _UPLOADS[up["id"]] = uploads.load_export(up)
 
 
 def _cell(v: Any) -> Any:
@@ -274,6 +305,7 @@ def worker_main(conn: Connection, fake: bool) -> None:
         if req is None:
             return
         try:
+            _sync_uploads(req)
             out = _answer(model, probe, req, lambda stage: conn.send({"type": "stage", "stage": stage}), layer_src)
         except Exception as e:  # noqa: BLE001 - report any failure (e.g. CUDA OOM) to the client
             out = {"db_id": req.get("db_id"), "question": req.get("question"), "error": f"{type(e).__name__}: {e}",
@@ -320,13 +352,15 @@ class WorkerClient:
             self.ready_info = msg
             self.ready = msg.get("type") == "ready"
 
-    def ask(self, db_id: str, question: str, on_stage: Any = None, timeout_s: float | None = None) -> dict[str, Any]:
+    def ask(self, db_id: str, question: str, on_stage: Any = None, timeout_s: float | None = None,
+            upload: dict[str, Any] | None = None, uploads_live: list[str] | None = None) -> dict[str, Any]:
         """Relays {"type":"stage"} messages to on_stage(stage) and returns the result. Waiting for the worker to
-        be ready does not count; past timeout_s (default ALTIMETER_JOB_TIMEOUT) the worker is restarted."""
+        be ready does not count; past timeout_s (default ALTIMETER_JOB_TIMEOUT) the worker is restarted.
+        upload: uploads.Store.export() for an "upload:" db_id; uploads_live: ids the worker may keep."""
         timeout_s = job_timeout_s() if timeout_s is None else timeout_s
         try:
             self.wait_ready()
-            self.conn.send({"db_id": db_id, "question": question})
+            self.conn.send({"db_id": db_id, "question": question, "upload": upload, "uploads_live": uploads_live})
             deadline = time.monotonic() + timeout_s
             while True:
                 left = deadline - time.monotonic()

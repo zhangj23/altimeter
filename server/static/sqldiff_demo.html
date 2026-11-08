@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171a1f">
+<title>SQL diff</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="sqldiff.css">
+<style>
+html, body { margin: 0; background: #171a1f; color: #e8e6e0; }
+body { font: 400 17px/1.45 "Poppins", sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 8px 16px 48px; }
+section.case { padding: 18px 0 24px; border-bottom: 1px solid #343a43; }
+section.case:last-child { border-bottom: 0; }
+h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+p.q { margin: 0 0 14px; font-size: 14px; color: #9ca1a8; }
+p.err { margin: 0; font-size: 14px; color: #cf5c4f; }
+</style>
+</head>
+<body>
+<main id="cases"></main>
+<script src="sqldiff.js"></script>
+<script>
+/* Renders the auditor's correction for three presets: POST /api/check -> response.sql (as written) and
+   response.corrected.sql (auditor rewrite or the preset's hand fix). ?p=<preset id> shows one preset. */
+(async () => {
+  const ids = ["club_budget", "bird197", "bird571"];
+  const only = new URLSearchParams(location.search).get("p");
+  const main = document.getElementById("cases");
+  const add = (tag, cls, text, parent) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    e.textContent = text;
+    parent.append(e);
+    return e;
+  };
+  let presets = {};
+  try {
+    const r = await fetch("/api/presets");
+    for (const p of (await r.json()).presets) presets[p.id] = p;
+  } catch (e) {
+    add("p", "err", "Could not load /api/presets: " + e.message, main);
+    return;
+  }
+  for (const id of ids.filter((x) => !only || x === only)) {
+    const sec = add("section", "case", "", main);
+    const p = presets[id];
+    if (!p) { add("p", "err", id + " is not available on this server", sec); continue; }
+    add("h2", null, p.label, sec);
+    add("p", "q", p.question, sec);
+    const box = add("div", null, "", sec);
+    try {
+      const r = await fetch("/api/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db_id: p.db_id, sql: p.sql, preset: p.id }),
+      });
+      const out = await r.json();
+      if (!r.ok) throw new Error(out.error || r.status);
+      if (!out.corrected || !out.corrected.sql) { add("p", "err", "No correction returned: " + (out.message || ""), box); continue; }
+      SqlDiff.render(box, out.sql, out.corrected.sql);
+    } catch (e) {
+      add("p", "err", "Check failed: " + e.message, box);
+    }
+  }
+})();
+</script>
+</body>
+</html>

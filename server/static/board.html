@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Altimeter departures</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="board.css">
+</head>
+<body>
+<header class="head">
+  <h1>Altimeter</h1>
+  <div class="counters">
+    <div class="counter"><div class="f" id="c-answered"></div><span>answered</span></div>
+    <div class="counter"><div class="f" id="c-flagged"></div><span>double counts flagged</span></div>
+    <div class="counter"><div class="f" id="c-median"></div><span>median answer time</span></div>
+  </div>
+</header>
+
+<section class="board" id="board" aria-live="polite">
+  <div class="cols" aria-hidden="true">
+    <span>Time</span><span>Database</span><span>Question</span><span>Reading</span><span>Band</span><span>Status</span><span></span>
+  </div>
+  <div class="rows" id="rows"></div>
+</section>
+
+<div class="clouds" aria-hidden="true">
+  <svg class="layer far" viewBox="0 0 2400 160" preserveAspectRatio="none">
+    <g id="far">
+      <path d="M0 160V110c40-30 120-40 170-10 30-50 120-60 170-20 50-30 130-20 150 20 60-20 110 10 110 50v10H0z"/>
+      <path d="M700 160v-40c30-40 90-50 140-20 20-50 110-70 170-30 40-20 100-10 120 30 50-10 90 10 90 40v20H700z"/>
+      <path d="M1350 160v-30c30-40 110-50 160-10 30-60 150-70 200-20 50-20 120 0 130 40 40 0 70 20 70 40H1350z"/>
+      <path d="M2000 160v-50c40-30 110-30 150 0 30-40 110-50 160-10 30-10 70 0 90 30v30H2000z"/>
+    </g>
+    <use href="#far" x="2400"/>
+  </svg>
+  <svg class="layer mid" viewBox="0 0 2400 160" preserveAspectRatio="none">
+    <g id="mid">
+      <path d="M200 160v-30c20-30 70-40 110-20 20-40 90-50 130-20 30-20 80-10 100 20 40-10 70 10 70 40v10H200z"/>
+      <path d="M1000 160v-40c30-40 100-50 150-20 20-40 100-60 160-30 50-20 120-10 140 30 40-10 80 10 80 40v20H1000z"/>
+      <path d="M1850 160v-20c20-30 80-40 120-20 20-40 100-50 140-20 40-20 90-10 110 30 30 0 60 10 60 30H1850z"/>
+    </g>
+    <use href="#mid" x="2400"/>
+  </svg>
+  <svg class="layer near" viewBox="0 0 2400 160" preserveAspectRatio="none">
+    <g id="near">
+      <path d="M-100 160v-20c30-30 90-40 130-10 20-30 90-40 130-10 30-10 70 0 90 30v10H-100z"/>
+      <path d="M600 160v-30c30-40 110-50 160-10 30-40 120-50 170-10 50-10 100 0 120 40v10H600z"/>
+      <path d="M1500 160v-20c20-30 80-40 120-10 30-40 110-50 160-10 40-10 90 0 110 30v10H1500z"/>
+      <path d="M2150 160v-20c30-30 90-40 130-10 20-30 90-40 130-10 20-10 50 0 60 20v20H2150z"/>
+    </g>
+    <use href="#near" x="2400"/>
+  </svg>
+</div>
+
+<script src="board.js"></script>
+</body>
+</html>

@@ -27,6 +27,77 @@ const el = (tag, cls, text) => {
 const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const smoothScroll = () => (REDUCED() ? "auto" : "smooth");
 
+/* ---------- motion primitives: they only ever move values the payload carries ---------- */
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+function tween(from, to, ms, onFrame, onDone) { // one rAF loop; reduced motion jumps to the end
+  if (REDUCED() || ms <= 0 || from === to) { onFrame(to, 1); if (onDone) onDone(); return () => {}; }
+  let raf = 0;
+  const t0 = performance.now();
+  const step = (now) => {
+    const u = Math.min(1, (now - t0) / ms);
+    onFrame(from + (to - from) * easeOut(u), u);
+    if (u < 1) raf = requestAnimationFrame(step); else if (onDone) onDone();
+  };
+  raf = requestAnimationFrame(step);
+  return () => cancelAnimationFrame(raf);
+}
+// Damped spring: stiffness 70, damping ratio 0.72 (one ~4% overshoot, then settled). Semi-implicit Euler.
+function spring(from, to, onFrame, onDone) {
+  if (REDUCED() || from === to) { onFrame(to); if (onDone) onDone(); return () => {}; }
+  const k = 70, c = 2 * 0.72 * Math.sqrt(k);
+  let x = from, v = 0, last = performance.now(), raf = 0;
+  const step = (now) => {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    for (let n = 0; n < 4; n++) { const h = dt / 4; v += (-k * (x - to) - c * v) * h; x += v * h; }
+    if (Math.abs(x - to) < 0.0005 && Math.abs(v) < 0.002) { onFrame(to); if (onDone) onDone(); return; }
+    onFrame(x);
+    raf = requestAnimationFrame(step);
+  };
+  raf = requestAnimationFrame(step);
+  return () => cancelAnimationFrame(raf);
+}
+// Tweens a figure shown as text ("355", "116.6527", "1,234") with the same decimals and grouping.
+function numberText(text) {
+  const s = String(text);
+  if (!/^-?[\d,]*\.?\d+$/.test(s)) return null;
+  const v = Number(s.replace(/,/g, ""));
+  if (!Number.isFinite(v)) return null;
+  const dec = (s.split(".")[1] || "").length;
+  const grouped = s.includes(",");
+  return { v, fmt: (x) => (grouped ? x.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec }) : x.toFixed(dec)) };
+}
+
+/* ---------- clouds behind a dial: flat banks in panel greys; the layer's height follows that run's needle ---------- */
+function cloudPath(seed, W, H, base, rMin, rMax) { // deterministic arcs along a baseline, closed to the bottom
+  let s = seed;
+  const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
+  let x = -rMax, d = `M${-rMax},${H} L${-rMax},${base}`;
+  while (x < W + rMax) {
+    const r = rMin + rnd() * (rMax - rMin);
+    const cx = x + r * (0.55 + rnd() * 0.35);
+    d += ` A${r},${r * (0.85 + rnd() * 0.15)} 0 0 1 ${(cx + r).toFixed(1)},${base}`;
+    x = cx + r * 0.55;
+  }
+  return d + ` L${x + rMax},${H} Z`;
+}
+function makeClouds() {
+  const host = el("div", "clouds");
+  host.setAttribute("aria-hidden", "true");
+  const W = 1200, H = 360;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "xMidYMax slice" });
+  [[11, 100, 115, 150, "l1"], [29, 230, 75, 120, "l2"], [47, 330, 50, 90, "l3"]].forEach(([seed, base, r0, r1, cls]) => {
+    const band = svgEl("g", { class: cls });
+    const d = cloudPath(seed, W, H, base, r0, r1);
+    band.append(svgEl("path", { d }), svgEl("path", { d, transform: `translate(${W} 0)` })); // two copies: a seamless drift
+    svg.append(band);
+  });
+  host.append(svg);
+  // level 1: the layer fills its box; 0: fully below the card. Ask rises into cloud, Cruise sinks away.
+  const level = (s) => (s == null ? 0.2 : 0.16 + 0.84 * Math.pow(1 - clamp01(s), 1.4));
+  return { node: host, set: (s) => { host.style.transform = `translateY(${((1 - level(s)) * 100).toFixed(2)}%)`; } };
+}
+
 let ws = null;
 let retryMs = 500;
 let retryTimer = null;
@@ -38,6 +109,7 @@ let warmT0 = null; // performance.now() when the model started warming
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* storage unavailable */ } },
 };
 function randomId() {
   const a = new Uint8Array(12);
@@ -86,11 +158,15 @@ function makeDial() {
     svgEl("circle", { class: "bezel-edge", cx: 150, cy: 150, r: 139 }));
   const gap = 0.004;
   for (const b of BANDS) svg.append(svgEl("path", { class: "arc arc-" + b.key, d: arcPath(b.from + gap, b.to - gap, 123) }));
+  const ticks = [];
   for (let i = 0; i <= 50; i++) {
     const s = i / 50, major = i % 5 === 0;
     const [x1, y1] = polar(s, 116), [x2, y2] = polar(s, major ? 100 : 108);
-    svg.append(svgEl("line", { class: major ? "tick-major" : "tick-minor", x1: x1.toFixed(2), y1: y1.toFixed(2), x2: x2.toFixed(2), y2: y2.toFixed(2) }));
+    const t = svgEl("line", { class: major ? "tick-major" : "tick-minor", x1: x1.toFixed(2), y1: y1.toFixed(2), x2: x2.toFixed(2), y2: y2.toFixed(2) });
+    ticks.push(t);
+    svg.append(t);
   }
+  const lightTicks = (s) => { for (let i = 0; i < ticks.length; i++) ticks[i].classList.toggle("lit", s != null && i / 50 <= s + 1e-9); };
   for (const [s, label] of [[0, "0"], [0.5, ".5"], [0.8, ".8"], [1, "1"]]) {
     const [x, y] = polar(s, 80);
     const t = svgEl("text", { class: "num", x: x.toFixed(2), y: y.toFixed(2) });
@@ -105,45 +181,51 @@ function makeDial() {
   wobble.append(needle);
   svg.append(wobble);
   root.append(svg);
-  // Drum: digit, point, digit, digit; the point never moves.
+  // Drum: digit, point, digit, digit; the point never moves. Each reel is 0-9, a wrap 0, then the blank dash.
   const drum = el("div", "drum blank");
   for (let k = 0; k < 4; k++) {
     if (k === 1) { drum.append(el("span", "dot", ".")); continue; }
     const slot = el("span", "slot");
     const reel = el("span", "reel");
-    for (const ch of "0123456789-") reel.append(el("span", null, ch));
+    for (const ch of "01234567890-") reel.append(el("span", null, ch));
     slot.append(reel);
     drum.append(slot);
   }
   root.append(drum);
   const reels = drum.querySelectorAll(".reel");
+  const BLANK = 11;
+  const roll = (i, pos) => { reels[i].style.transform = `translateY(${(0.55 - pos).toFixed(3)}em)`; };
 
-  function setDrum(text, snap) {
+  function setDrum(text) { // exact figures (or blank)
     drum.classList.toggle("blank", text == null);
-    drum.classList.toggle("snap", !!snap);
-    if (snap) void drum.offsetWidth;
     const chars = (text || "-.--").split("");
-    [chars[0], chars[2], chars[3]].forEach((ch, i) => {
-      const k = ch === "-" ? 10 : Number(ch);
-      reels[i].style.transform = `translateY(${(0.55 - k).toFixed(2)}em)`;
-    });
-    if (snap) { void drum.offsetWidth; drum.classList.remove("snap"); }
+    [chars[0], chars[2], chars[3]].forEach((ch, i) => roll(i, ch === "-" ? BLANK : Number(ch)));
   }
-  function point(s, snap) {
-    if (snap) { needle.classList.add("snap"); void needle.getBoundingClientRect(); }
-    needle.style.transform = `rotate(${angleOf(s).toFixed(2)}deg)`;
-    if (snap) { void needle.getBoundingClientRect(); needle.classList.remove("snap"); }
+  function rollDrum(v) { // mid-sweep: the hundredths wheel turns continuously, the others step with it
+    const h = v * 100;
+    roll(0, Math.floor(v) % 10);
+    roll(1, Math.floor(v * 10) % 10 + Math.max(0, (h % 10) - 9)); // steps as the hundredths wheel passes 9
+    roll(2, h % 10);
   }
+  const point = (s) => { needle.style.transform = `rotate(${angleOf(s).toFixed(2)}deg)`; };
+  let stop = () => {};
+  let onMove = null; // the clouds behind the dial follow the needle
   /* mode: "idle" (no reading), "hold" (awaiting probe: hollow needle parked at 0), or a score in 0..1 */
+  let neutral = false; // uploaded data: no band colours, the clouds stay low
   function set(score, mode) {
-    if (mode === "hold") { root.className = "dial hold"; point(0, true); setDrum(null, true); return; }
-    if (score == null || Number.isNaN(score)) { root.className = "dial idle"; point(0, false); setDrum(null, false); return; }
+    stop();
+    if (mode === "hold") { root.className = "dial hold"; point(0); setDrum(null); lightTicks(null); if (onMove) onMove(null); return; }
+    if (score == null || Number.isNaN(score)) { root.className = "dial idle"; point(0); setDrum(null); lightTicks(null); if (onMove) onMove(null); return; }
     const s = clamp01(score);
-    root.className = "dial scored";
-    point(s, false);
-    setDrum(s.toFixed(2), false);
+    root.className = neutral ? "dial scored uncal" : "dial scored";
+    if (neutral && onMove) onMove(null);
+    drum.classList.remove("blank");
+    // the sweep: a damped spring from 0; ticks light as the needle passes, the drum rolls with it
+    const move = neutral ? null : onMove;
+    stop = spring(0, s, (x) => { point(x); lightTicks(x); rollDrum(Math.max(0, x)); if (move) move(x); },
+      () => { point(s); lightTicks(s); setDrum(s.toFixed(2)); if (move) move(s); });
   }
-  return { root, set };
+  return { root, set, follow: (fn) => { onMove = fn; }, neutral: () => { neutral = true; } };
 }
 
 /* ---------- status line and announcements ---------- */
@@ -234,6 +316,9 @@ function newRun(question, db_id) {
   const card = el("div", "body reply");
   const top = el("section", "reading-row");
   const dial = makeDial();
+  const clouds = makeClouds();
+  dial.follow(clouds.set);
+  top.append(clouds.node);
   const read = el("div", "read");
   const stage = el("div", "stage");
   const stageText = el("b", null, "Awaiting probe");
@@ -477,8 +562,16 @@ function renderWhy(r) {
   const label = (g) => (g === "Internals" ? termLabel("probe", ex) : g);
   const maxAbs = Math.max(1e-9, ...groups.map((g) => Math.abs(g.value)));
   const ul = el("ul", "terms");
+  let k = 0;
+  if (baseline != null) { // the sum starts here, so the baseline row lands first
+    const li = el("li", "base");
+    li.style.setProperty("--i", k++);
+    li.append(el("span", "n", "Baseline"), el("span", "c", sgn(baseline, 2)));
+    ul.append(li);
+  }
   for (const g of groups) {
     const li = el("li");
+    li.style.setProperty("--i", k++);
     li.append(el("span", "n", label(g.name)), el("span", "c " + (g.value >= 0 ? "up" : "down"), sgn(g.value, 2)));
     const track = el("span", "track");
     const bar = el("i", g.value >= 0 ? "up" : "down");
@@ -491,15 +584,37 @@ function renderWhy(r) {
     li.append(track);
     ul.append(li);
   }
-  if (baseline != null) {
-    const li = el("li", "base");
-    li.append(el("span", "n", "Baseline"), el("span", "c", sgn(baseline, 2)));
-    ul.append(li);
-  }
   const tot = el("li", "sum");
-  tot.append(el("span", "n", "Sum"), el("span", "c", `${neg(ex.logit, 2)} → ${ex.needle.toFixed(2)}`));
+  tot.style.setProperty("--i", baseline != null ? 1 : 0);
+  const totC = el("span", "c", `${neg(ex.logit, 2)} → ${ex.needle.toFixed(2)}`);
+  tot.append(el("span", "n", "Sum"), totC);
   ul.append(tot);
   det.append(ul);
+  // opening Why: rows land one by one, bars grow from the zero line, the sum ticks up as each lands
+  const b0 = baseline != null ? baseline : 0;
+  const first = baseline != null ? 1 : 0;
+  const ROW = 110, GROW = 360;
+  const at = (ms) => { // the sum at cascade time ms: baseline + the groups landed so far (partially while growing)
+    let s = b0;
+    groups.forEach((g, i) => { s += g.value * easeOut(Math.min(1, Math.max(0, (ms - ((first + i) * ROW + 80)) / GROW))); });
+    return s;
+  };
+  const end = (first + groups.length - 1) * ROW + 80 + GROW;
+  let raf = 0;
+  det.addEventListener("toggle", () => {
+    cancelAnimationFrame(raf);
+    if (!det.open) { ul.classList.remove("go"); return; }
+    if (REDUCED()) { ul.classList.add("go"); return; }
+    totC.textContent = neg(b0, 2);
+    const t0 = performance.now();
+    const step = (now) => {
+      const ms = now - t0;
+      totC.textContent = neg(at(Math.min(ms, end)), 2);
+      if (ms < end) raf = requestAnimationFrame(step);
+      else totC.textContent = `${neg(ex.logit, 2)} → ${ex.needle.toFixed(2)}`;
+    };
+    requestAnimationFrame(() => { ul.classList.add("go"); raf = requestAnimationFrame(step); });
+  });
 
   const all = el("details", "weights");
   all.append(el("summary", null, "All weights"));
@@ -536,6 +651,9 @@ function fillReply(card, r, secs) {
   if (nd == null) {
     read.append(el("span", "bandname", "No probe"), el("b", null, "--"));
     card.summary("--", "No probe");
+  } else if (r.calibrated === false) { // uploaded data: the bands were calibrated on BIRD dev only
+    read.append(el("span", "bandname uncal", r.calibration_note || "Needle not calibrated for this data"), el("b", null, clamp01(nd).toFixed(2)));
+    card.summary(clamp01(nd).toFixed(2), "Not calibrated");
   } else {
     const b = bandOf(clamp01(nd));
     const name = el("span", "bandname", b.name);
@@ -550,6 +668,7 @@ function fillReply(card, r, secs) {
   if (r.fake) meta.append(el("span", null, "Fake worker"));
   if (r.mock) meta.append(el("span", null, "Mock fixture"));
   read.append(meta);
+  if (r.calibrated === false) card.dial.neutral();
   card.dial.set(nd, "noprobe");
 
   const greedyShown = hasReadings && r.readings.some((rd) => normSql(rd.sql) === normSql(r.sql));
@@ -567,9 +686,11 @@ function fillReply(card, r, secs) {
   }
   const why = renderWhy(r);
   if (why) { why.style.marginTop = greedyShown ? "0" : "12px"; body.append(why); }
-  if (body.children.length) card.card.append(body);
-  if (hasReadings) card.card.append(renderReadings(r));
-  if (r.audit && r.audit.flagged) card.card.append(renderAudit(r.audit));
+  const parts = [];
+  if (body.children.length) parts.push(body);
+  if (hasReadings) parts.push(renderReadings(r));
+  if (r.audit && r.audit.flagged) parts.push(renderAudit(r.audit, r));
+  parts.forEach((p, i) => { p.classList.add("in"); p.style.setProperty("--i", i + 1); card.card.append(p); }); // sections land in order
 }
 
 /* ---------- socket ---------- */
@@ -626,14 +747,17 @@ function onMessage(ev) {
     if (m.job_id != null && m.job_id === lastJob) return; // already rendered (replay after a reconnect)
     if (m.job_id != null) { lastJob = m.job_id; store.set("altimeter.lastJob", String(m.job_id)); }
     const secs = pending && pending.phase === "working" ? ((performance.now() - pending.t0) / 1000).toFixed(1) : null;
-    const card = (pending && pending.card) || newRun(m.question || "Test flight", m.db_id || "");
+    const card = (pending && pending.card) || newRun(m.question || "Test flight", dbLabel(m.db_id || ""));
     pending = null;
     stopClock();
     syncAsk();
     setStatus("");
     fillReply(card, m, secs);
     const nd = needleOf(m);
-    let say = nd == null ? "Answer ready. No probe score." : `Confidence ${nd.toFixed(2)}, ${bandOf(clamp01(nd)).name}.`;
+    let say = nd == null ? "Answer ready. No probe score."
+      : m.calibrated === false ? `Score ${clamp01(nd).toFixed(2)}, not calibrated for uploaded data.`
+      : `Confidence ${nd.toFixed(2)}, ${bandOf(clamp01(nd)).name}.`;
+    if (isUpload(m.db_id) && uploader) uploader.refresh();
     if (m.error) say += " The query failed.";
     if (Array.isArray(m.readings) && m.readings.length >= 2) say += " Two readings, choose one.";
     announce(say);
@@ -703,6 +827,9 @@ function fmtFactor(x) {
   return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toPrecision(3);
 }
 
+// The first finding that carries a fan-out grid (POST /api/check returns one; an answer's audit does not).
+const fanoutOf = (a) => ((a && a.findings) || []).map((f) => f.fanout).find((x) => x && x.grid && x.grid.cells && x.grid.cells.length) || null;
+
 function auditFact(a) {
   if (a.flagged) return `Flagged, ${fmtFactor(a.findings[0].factor)}× rows`;
   if (!a.audited) return "No JOIN + aggregate";
@@ -719,19 +846,79 @@ function ratioWords(ratio) {
   return `${Math.round(Math.abs(r - 1) * 100)}% too ${hi ? "high" : "low"}`;
 }
 
-/* Struck as-written figure, corrected figure, and how far off it was. Animates once when attached. */
-function ledger(h) {
+/* One counted row and its joined copies, from the check's fan-out grid (real ids): the row the grid is
+   anchored on, or its first row. Returns {node, cells, n} or null. */
+function fanRow(fo) {
+  const g = fo && fo.grid;
+  if (!g || !g.cells || !g.cells.length) return null;
+  const rows = g.rows.map(String);
+  let r = g.anchor != null ? rows.indexOf(String(g.anchor)) : 0;
+  if (r < 0) r = 0;
+  const cells = g.cells.filter((c) => c[0] === r);
+  if (!cells.length) return null;
+  const node = el("div", "fan");
+  const L = fo.left || {}, R = fo.right || {};
+  node.append(el("span", "fcap", `${L.table || "row"} ${rows[r]} joins ${cells.length} ${R.table || "rows"} ${cells.length === 1 ? "row" : "rows"}${g.sampled ? ` (${fmtInt(fo.joined_rows)} joined rows in all)` : ""}`));
+  const row = el("div", "frow");
+  row.append(el("span", "src", rows[r]));
+  const boxes = cells.map((c, i) => {
+    const b = el("i", "fc " + (i ? "dup" : "keep"));
+    b.title = `${R.table || ""} ${g.cols[c[1]]}${c[2] > 1 ? ` ×${c[2]}` : ""}`;
+    row.append(b);
+    return b;
+  });
+  node.append(row);
+  return { node, cells: boxes, n: cells.length, measure: () => {
+    const x0 = boxes[0].offsetLeft;
+    boxes.forEach((b) => b.style.setProperty("--dx", `${(x0 - b.offsetLeft).toFixed(1)}px`));
+  } };
+}
+
+/* Struck as-written figure, corrected figure, and how far off it was. With a fan-out grid: the copies fan out
+   while the figure as written climbs, collapse back to one while the corrected figure counts down, then the
+   strike. Animates once when attached. */
+function ledger(h, fo) {
   const box = el("div", "ledger");
   if (Math.max(h.before_text.length, h.after_text.length) > 6) box.classList.add("long");
   const was = el("div", "col");
-  was.append(el("span", "lab", "As written"), el("span", "fig was", h.before_text));
+  const wasFig = el("span", "fig was", h.before_text);
+  was.append(el("span", "lab", "As written"), wasFig);
   const now = el("div", "col");
-  now.append(el("span", "lab", "Corrected"), el("span", "fig now", h.after_text));
+  const nowFig = el("span", "fig now", h.after_text);
+  now.append(el("span", "lab", "Corrected"), nowFig);
   box.append(was, now);
   const rw = ratioWords(h.ratio);
   if (rw) box.append(el("span", "times", rw));
   box.append(el("span", "what", h.row ? `${h.column} for ${h.row}` : h.column));
-  requestAnimationFrame(() => requestAnimationFrame(() => box.classList.add("go")));
+  const fan = fanRow(fo);
+  if (fan) box.append(fan.node);
+  const nb = numberText(h.before_text), na = numberText(h.after_text);
+  const anim = !REDUCED();
+  const timers = [];
+  const at = (ms, fn) => (anim ? timers.push(setTimeout(fn, ms)) : fn());
+  // schedule (ms after attach)
+  const stag = fan ? Math.min(60, 700 / fan.n) : 0;
+  const fanEnd = fan ? 200 + (fan.n - 1) * stag + 300 : 0;
+  const T = fan
+    ? { climb: 200, climbMs: Math.max(400, fanEnd - 200), collapse: fanEnd + 250, down: fanEnd + 250, once: fanEnd + 730, strike: fanEnd + 900, times: fanEnd + 1150 }
+    : { climb: 100, climbMs: 500, collapse: 0, down: 700, once: 0, strike: 1250, times: 1500 };
+  if (anim && nb) wasFig.textContent = nb.fmt(0);
+  if (anim && nb && na) nowFig.textContent = nb.fmt(nb.v);
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (fan) {
+      fan.measure();
+      fan.cells.forEach((c, i) => at(200 + i * stag, () => c.classList.add("on")));
+      at(T.collapse, () => fan.node.classList.add("collapse"));
+      at(T.once, () => { fan.node.classList.remove("collapse"); fan.node.classList.add("once"); });
+    }
+    if (anim && nb) at(T.climb, () => { wasFig.classList.add("live"); tween(0, nb.v, T.climbMs, (x) => { wasFig.textContent = nb.fmt(x); }, () => { wasFig.classList.remove("live"); wasFig.textContent = h.before_text; }); });
+    at(T.down, () => {
+      box.classList.add("entered");
+      if (anim && nb && na) { nowFig.classList.add("live"); tween(nb.v, na.v, 560, (x) => { nowFig.textContent = na.fmt(x); }, () => { nowFig.classList.remove("live"); nowFig.textContent = h.after_text; }); }
+    });
+    at(T.strike, () => box.classList.add("struck"));
+    at(T.times, () => box.classList.add("rated"));
+  }));
   return box;
 }
 
@@ -804,11 +991,40 @@ function fixParts(a) {
   return [nodes, det];
 }
 
+/* Join map (which JOIN repeats the counted rows), then the SQL diff against the corrected query. Every flagged
+   result gets one, between the struck figure and the long SQL. The map is redrawn when the width changes. */
+const maps = new Set(); // {draw}
+function mapAndDiff(db_id, check) {
+  const wrap = el("div", "mapdiff");
+  const box = el("div", "jmbox");
+  wrap.append(box);
+  let schema = null, w = 0;
+  const entry = {};
+  entry.draw = (animate) => {
+    if (!box.isConnected) { maps.delete(entry); return; }
+    const cw = box.clientWidth;
+    if (!cw || (!animate && cw === w)) return;
+    w = cw;
+    JoinMap.render(box, schema, check, { sql: check.sql, width: cw, animate });
+  };
+  if (window.JoinMap) fetchSchema(db_id).then((s) => { schema = s; maps.add(entry); requestAnimationFrame(() => entry.draw(true)); });
+  const c = check.corrected;
+  if (window.SqlDiff && c && c.sql) {
+    const d = el("div", "diffbox");
+    SqlDiff.render(d, check.sql, c.sql, { copy: false });
+    wrap.append(d);
+  }
+  return wrap;
+}
+let mapsT = null;
+addEventListener("resize", () => { clearTimeout(mapsT); mapsT = setTimeout(() => maps.forEach((m) => m.draw(false)), 150); });
+
 /* Audit block inside an answer (only when flagged). */
-function renderAudit(a) {
+function renderAudit(a, r) {
   const sec = el("section", "audit");
   sec.append(el("h2", null, "Double counting"));
-  if (a.headline && a.corrected) sec.append(ledger(a.headline));
+  if (a.headline && a.corrected) sec.append(ledger(a.headline, fanoutOf(a)));
+  if (r && r.sql) sec.append(mapAndDiff(r.db_id, { ...a, sql: r.sql, flagged: true }));
   const [nodes, det] = fixParts(a);
   sec.append(...nodes);
   if (det) sec.append(det);
@@ -831,7 +1047,7 @@ function renderCheck(d) {
   const sheet = el("article", "sheet");
   let kind, title, sub;
   if (o.error) { kind = "error"; title = "Query does not run"; sub = o.error; }
-  else if (d.flagged) { kind = "flagged"; title = "Double counting"; sub = d.db_id; }
+  else if (d.flagged) { kind = "flagged"; title = "Double counting"; sub = dbLabel(d.db_id); }
   else if (!d.audited) { kind = "clear"; title = "Nothing to check"; sub = "No JOIN feeds a SUM, AVG or COUNT, so nothing can be double counted."; }
   else if (d.audit_error) { kind = "error"; title = "Audit incomplete"; sub = d.audit_error; }
   else { kind = "clear"; title = "No double counting found"; sub = "No JOIN repeats a counted row. Other mistakes are not checked."; }
@@ -839,7 +1055,7 @@ function renderCheck(d) {
   const vh = el("div", "verdict");
   vh.append(el("h3", null, title), el("p", null, sub));
   top.append(vh);
-  if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline));
+  if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline, fanoutOf(d)));
   let det = null;
   if (d.flagged) {
     const [nodes, rw] = fixParts(d);
@@ -847,10 +1063,15 @@ function renderCheck(d) {
     det = rw;
   }
   sheet.append(top);
+  if (d.flagged && d.sql) {
+    const md = el("section");
+    md.append(mapAndDiff(d.db_id, d));
+    sheet.append(md);
+  }
 
   const items = [];
   const nrows = o.rows ? o.rows.length : 0;
-  items.push([`Runs on ${d.db_id}`, o.error ? "No" : `${rowCount(nrows, o.rows_capped, nrows)}, ${fmtSeconds(o.seconds)}`, o.error ? "bad" : null]);
+  items.push([`Runs on ${isUpload(d.db_id) ? "your data" : d.db_id}`, o.error ? "No" : `${rowCount(nrows, o.rows_capped, nrows)}, ${fmtSeconds(o.seconds)}`, o.error ? "bad" : null]);
   if (!o.error) items.push(["JOIN with SUM, AVG or COUNT", d.audited ? "Present" : "None", null]);
   if (d.audited) {
     const f = d.findings[0];
@@ -896,6 +1117,7 @@ function renderPresets() {
     b.addEventListener("click", () => {
       activePreset = p.id;
       $("checkDb").value = p.db_id;
+      showSchema("checkSchema", p.db_id);
       $("sql").value = p.sql;
       renderPresets();
       $("checkOut").replaceChildren();
@@ -947,6 +1169,7 @@ async function runCheck(e) {
   try {
     const r = await apiCall("/api/check", body);
     checkBusy(false);
+    if (isUpload(db_id) && uploader) uploader.refresh(); // the server TTL restarts on every use
     if (!r.ok) { setCheckStatus(r.data.error || `Check failed (HTTP ${r.status}).`); $("checkOut").replaceChildren(); return; }
     setCheckStatus("Checked", `${((performance.now() - t0) / 1000).toFixed(1)} s`);
     renderCheck(r.data);
@@ -961,6 +1184,8 @@ async function runCheck(e) {
 
 function setMode(mode) {
   const test = mode === "test";
+  const was = document.body.classList.contains("test");
+  document.body.classList.toggle("moved", was !== test); // only a change of tab slides the panel in
   document.body.classList.toggle("test", test);
   $("tabTest").setAttribute("aria-selected", String(test));
   $("tabCheck").setAttribute("aria-selected", String(!test));
@@ -975,6 +1200,58 @@ $("sql").addEventListener("input", () => {
   if (p && normSql($("sql").value) !== normSql(p.sql)) { activePreset = null; renderPresets(); }
 });
 
+/* ---------- schema of the selected database ---------- */
+const schemas = new Map(); // db_id -> Promise<schema | null>
+function fetchSchema(db_id) {
+  if (!schemas.has(db_id)) {
+    const p = fetch(`/api/schema?db_id=${encodeURIComponent(db_id)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    p.then((s) => { if (!s) schemas.delete(db_id); });
+    schemas.set(db_id, p);
+  }
+  return schemas.get(db_id);
+}
+
+function schemaTable(t) {
+  const d = el("div", "t");
+  const th = el("div", "th");
+  th.append(el("span", "tn", t.name));
+  if (t.rows != null) th.append(el("span", "rc", `${t.rows.toLocaleString("en-US")} ${t.rows === 1 ? "row" : "rows"}`));
+  const cols = el("p", "cols");
+  t.columns.forEach((c, i) => {
+    if (i) cols.append(", ");
+    const name = c.pk ? el("b", null, c.name) : document.createTextNode(c.name);
+    if (!c.fk) { cols.append(name); return; }
+    const link = el("span", "link"); // keep "column -> table" on one line
+    link.append(name, el("span", "fk", ` → ${c.fk.split(".")[0]}`));
+    cols.append(link);
+  });
+  d.append(th, cols);
+  return d;
+}
+
+async function showSchema(boxId, db_id) {
+  const box = $(boxId);
+  box.dataset.db = db_id || "";
+  const s = db_id ? await fetchSchema(db_id) : null;
+  if (box.dataset.db !== (db_id || "")) return; // the selection changed while this one loaded
+  if (!s || !s.tables) { box.hidden = true; return; }
+  const n = s.tables.length;
+  box.querySelector("summary").textContent = `${n} ${n === 1 ? "table" : "tables"}`;
+  const list = box.querySelector(".tables");
+  list.replaceChildren(...s.tables.map(schemaTable));
+  list.scrollTop = 0;
+  box.hidden = false;
+}
+
+$("checkDb").addEventListener("change", () => {
+  const db = $("checkDb").value;
+  const p = presets.find((x) => x.id === activePreset);
+  if (p && p.db_id !== db) { activePreset = null; renderPresets(); }
+  showSchema("checkSchema", db);
+});
+$("db").addEventListener("change", () => showSchema("testSchema", $("db").value));
+
 /* ---------- test flight form ---------- */
 function fillDbs(dbs) {
   const sel = $("db");
@@ -985,6 +1262,9 @@ function fillDbs(dbs) {
   $("checkDb").replaceChildren(...dbs.map((d) => { const o = el("option", null, d); o.value = d; return o; }));
   $("checkDb").value = dbs.includes("codebase_community") ? "codebase_community" : sel.value;
   renderSuggestions(dbs);
+  syncUploadOption();
+  showSchema("checkSchema", $("checkDb").value);
+  showSchema("testSchema", sel.value);
 }
 
 async function loadDbs() {
@@ -1003,13 +1283,71 @@ function submit(e) {
   if (!question || !db_id || pending || warming()) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop yet.", "", true); connect(); return; }
   store.set("altimeter.db", db_id);
-  pending = { question, db_id, t0: performance.now(), phase: "sent", card: newRun(question, db_id) };
+  pending = { question, db_id, t0: performance.now(), phase: "sent", card: newRun(question, dbLabel(db_id)) };
   syncAsk();
   setStatus("");
   pending.card.stage("Sent", "");
   pending.card.node.scrollIntoView({ block: "nearest", behavior: smoothScroll() });
   announce("Question sent.");
   ws.send(JSON.stringify({ db_id, question }));
+}
+
+/* ---------- your own data: an upload is selectable as "Your data" in both tabs; its db_id stays on this phone ---------- */
+const UPLOAD_KEY = "altimeter.upload";
+let uploadDb = null;
+let uploader = null;
+function isUpload(d) { return typeof d === "string" && d.startsWith("upload:"); }
+function dbLabel(d) { return isUpload(d) ? "Your data" : d; }
+function syncUploadOption() {
+  for (const id of ["checkDb", "db"]) {
+    const sel = $(id);
+    for (const o of [...sel.options]) if (isUpload(o.value) && o.value !== uploadDb) o.remove();
+    if (uploadDb && ![...sel.options].some((o) => o.value === uploadDb)) {
+      const o = el("option", null, "Your data");
+      o.value = uploadDb;
+      sel.prepend(o);
+    }
+  }
+}
+function onUploadReady(dbId) {
+  const fresh = dbId !== store.get(UPLOAD_KEY); // a restore after reload keeps the current selection
+  uploadDb = dbId;
+  store.set(UPLOAD_KEY, dbId);
+  schemas.delete(dbId);
+  syncUploadOption();
+  if (!fresh) return;
+  $("checkDb").value = dbId;
+  $("db").value = dbId;
+  if (activePreset) { activePreset = null; $("sql").value = ""; renderPresets(); }
+  $("checkOut").replaceChildren();
+  setCheckStatus("");
+  showSchema("checkSchema", dbId);
+  showSchema("testSchema", dbId);
+}
+function onUploadGone(dbId) {
+  if (store.get(UPLOAD_KEY) === dbId) store.del(UPLOAD_KEY);
+  if (uploadDb !== dbId) return;
+  uploadDb = null;
+  schemas.delete(dbId);
+  const inCheck = $("checkDb").value === dbId, inTest = $("db").value === dbId;
+  syncUploadOption();
+  const has = (sel, v) => [...$(sel).options].some((o) => o.value === v);
+  if (inCheck) {
+    if (has("checkDb", "codebase_community")) $("checkDb").value = "codebase_community";
+    showSchema("checkSchema", $("checkDb").value);
+  }
+  if (inTest) {
+    if (has("db", "formula_1")) $("db").value = "formula_1";
+    showSchema("testSchema", $("db").value);
+  }
+}
+if (window.Upload) {
+  uploader = Upload.render($("upload"), {
+    dbId: store.get(UPLOAD_KEY) || undefined,
+    onReady: onUploadReady,
+    onRemove: (id) => { fetch(`/api/upload/${encodeURIComponent(id.replace(/^upload:/, ""))}`, { method: "DELETE" }).catch(() => {}); onUploadGone(id); },
+    onExpire: onUploadGone,
+  });
 }
 
 $("flight").addEventListener("submit", submit);

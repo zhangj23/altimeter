@@ -58,8 +58,9 @@ function renderSb() {
   }
   auc.append(grid);
   const rows = (H.metrics || []).slice().sort((a, b) => b.auroc - a.auroc);
-  for (const m of rows) {
+  for (const [ri, m] of rows.entries()) {
     const r = el("div", "arow" + (m.key === "stacked" ? " ship" : ""));
+    r.style.setProperty("--i", ri); // bars grow top to bottom, each whisker drawn once its bar has landed
     r.title = `${m.label}: AUROC ${fx(m.auroc, 3)}, 95% CI ${ci3(m.ci95)}, n = ${n0(H.n)}`;
     const trk = el("div", "trk");
     const bar = el("i", "abar");
@@ -173,7 +174,14 @@ function drawLayers() {
     svg.append(sv("text", { x: X(p.layer), y: Hh - m.b + 1.2 * fs, "text-anchor": anchor, "font-size": small, class: p === sel ? "strong" : "" },
       String(p.layer)));
   }
-  svg.append(sv("path", { class: "line", d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.layer).toFixed(1)},${Y(p.auroc).toFixed(1)}`).join("") }));
+  const line = sv("path", { class: "line", d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.layer).toFixed(1)},${Y(p.auroc).toFixed(1)}`).join("") });
+  svg.append(line);
+  if (!reduced()) { // draws in layer by layer once the panel is marked drawn (#sbcol.drawn sets the offset to 0)
+    const len = line.getTotalLength();
+    line.setAttribute("stroke-dasharray", `${len}`);
+    line.setAttribute("stroke-dashoffset", `${len}`);
+    line.classList.add("draw");
+  }
   for (const p of pts) {
     if (p === sel) continue;
     const g = sv("g");
@@ -193,7 +201,7 @@ function drawLayers() {
     g.append(sv("title", null, `Layer ${sel.layer}: AUROC ${sel.auroc.toFixed(3)}, used by the probe`));
     g.append(sv("circle", { class: "sel", cx: X(sel.layer), cy: Y(sel.auroc), r: 5 }));
     svg.append(g);
-    svg.append(sv("text", { x: X(sel.layer), y: Y(sel.auroc) - 0.7 * fs, "text-anchor": "middle", "font-size": small, class: "strong" },
+    svg.append(sv("text", { x: X(sel.layer), y: Y(sel.auroc) - 0.7 * fs, "text-anchor": "middle", "font-size": small, class: "strong sel-l" },
       `Layer ${sel.layer}, used: ${sel.auroc.toFixed(3)}`));
   }
 }

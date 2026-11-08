@@ -24,7 +24,7 @@ from sqlglot import exp
 from altimeter.auditor import audit, has_join_aggregate
 from altimeter.sqlexec import run
 
-from .worker import db_path, list_dbs
+from .worker import db_path, known_db, list_dbs
 
 MAX_ROWS = 200
 EXEC_TIMEOUT_S = 5.0
@@ -678,7 +678,7 @@ def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: floa
 def annotate(result: dict[str, Any]) -> dict[str, Any]:
     """Add result["audit"] for the model's SQL. Cheap when there is no JOIN + aggregate (parse only)."""
     sql, db_id = result.get("sql"), result.get("db_id")
-    if not sql or not db_id or result.get("error") or db_id not in list_dbs():
+    if not sql or not db_id or result.get("error") or not known_db(db_id):
         return result
     t0 = time.time()
     try:
@@ -709,7 +709,7 @@ check_listeners: list[Callable[[dict[str, Any], dict[str, Any] | None], Awaitabl
 @router.post("/api/check")
 async def api_check(body: CheckIn) -> Any:
     sql = body.sql.strip()
-    if body.db_id not in list_dbs():
+    if not known_db(body.db_id):
         return JSONResponse({"error": f"unknown database: {body.db_id}"}, status_code=400)
     if not sql or len(sql) > MAX_SQL_CHARS:
         return JSONResponse({"error": f"SQL must be 1-{MAX_SQL_CHARS} characters"}, status_code=400)

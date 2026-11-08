@@ -1,0 +1,56 @@
+/* Join map. Colours fall back to the Altimeter avionics palette when the page defines no variables.
+   Set --jm-bg on the container to the colour behind the map (labels knock the line out with it). */
+.jm {
+  --jm-face: var(--face, #0f1114);
+  --jm-bezel: var(--bezel, #3a414b);
+  --jm-rule: var(--rule, #343a43);
+  --jm-ink: var(--ink, #e8e6e0);
+  --jm-ink-2: var(--ink-2, #9ca1a8);
+  --jm-ink-3: var(--ink-3, #6b7078);
+  --jm-ask: var(--ask, #cf5c4f);
+  --jm-caution: var(--caution, #d6a63e);
+  --jm-mono: var(--mono, ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace);
+  --jm-ease: var(--ease, cubic-bezier(.3,.75,.25,1));
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+  font-family: "Poppins", system-ui, sans-serif;
+}
+
+.jm text { fill: var(--jm-ink); }
+.jm .jm-name { font: 500 13px/1 var(--jm-mono); }
+.jm .jm-rows { font: 400 11px/1 "Poppins", system-ui, sans-serif; fill: var(--jm-ink-2); }
+.jm .jm-sub  { font: 400 11px/1 "Poppins", system-ui, sans-serif; fill: var(--jm-caution); }
+.jm .jm-agg  { font: 500 11px/1 var(--jm-mono); fill: var(--jm-ask); }
+.jm .jm-keys { font: 400 11px/1 var(--jm-mono); fill: var(--jm-ink); }
+.jm .jm-stat { font: 400 11px/1 "Poppins", system-ui, sans-serif; fill: var(--jm-ink-2); }
+.jm .jm-factor { font: 600 20px/1 "Poppins", system-ui, sans-serif; fill: var(--jm-ask); }
+.jm .jm-knock { fill: var(--jm-bg, var(--panel-2, #1f232a)); } /* --jm-bg comes from the container */
+
+.jm .jm-rect { fill: var(--jm-face); stroke: var(--jm-bezel); stroke-width: 1; }
+.jm .jm-neighbour .jm-rect { stroke: var(--jm-rule); stroke-dasharray: 3 3; }
+.jm .jm-neighbour .jm-name { fill: var(--jm-ink-3); }
+.jm .jm-neighbour .jm-rows { fill: var(--jm-ink-3); }
+.jm .jm-counted .jm-rect { stroke: var(--jm-ask); stroke-width: 1.5; }
+.jm .jm-repeating .jm-rect { stroke: var(--jm-caution); stroke-width: 1.5; }
+
+.jm .jm-edge { fill: none; stroke: var(--jm-bezel); stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: butt; }
+.jm .jm-edge-fk { stroke: var(--jm-rule); stroke-dasharray: 3 3; }
+.jm .jm-edge-fanout { stroke: var(--jm-ask); stroke-width: 2; }
+
+/* one orchestrated entrance: boxes settle, then the fan-out edge draws in, then its label */
+.jm .jm-box { opacity: 0; animation: jm-in 420ms var(--jm-ease) forwards; animation-delay: calc(var(--i, 0) * 60ms); }
+.jm .jm-edges { opacity: 0; animation: jm-fade 400ms linear 300ms forwards; }
+.jm .jm-edge-fanout { animation: jm-draw 800ms var(--jm-ease) 450ms forwards; }
+.jm .jm-label { opacity: 0; animation: jm-fade 300ms linear 1100ms forwards; }
+
+@keyframes jm-in { to { opacity: 1; } }
+@keyframes jm-fade { to { opacity: 1; } }
+@keyframes jm-draw { to { stroke-dashoffset: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .jm .jm-box, .jm .jm-edges, .jm .jm-label { animation: none; opacity: 1; }
+  .jm .jm-edge-fanout { animation: none; stroke-dashoffset: 0 !important; }
+}
+.jm.jm-static .jm-box, .jm.jm-static .jm-edges, .jm.jm-static .jm-label { animation: none; opacity: 1; }
+.jm.jm-static .jm-edge-fanout { animation: none; stroke-dashoffset: 0 !important; }

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171a1f">
+<title>Altimeter upload</title>
+<link rel="icon" href="data:,">
+<style>
+@font-face { font-family: "Poppins"; font-weight: 400; font-style: normal; font-display: swap; src: url(fonts/poppins-400.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 500; font-style: normal; font-display: swap; src: url(fonts/poppins-500.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 600; font-style: normal; font-display: swap; src: url(fonts/poppins-600.woff2) format("woff2"); }
+:root {
+  --panel: #171a1f; --panel-2: #1f232a; --panel-3: #282d35; --face: #0f1114; --bezel: #3a414b;
+  --ink: #e8e6e0; --ink-2: #9ca1a8; --ink-3: #6b7078; --rule: #343a43;
+  --ask: #cf5c4f; --caution: #d6a63e; --cruise: #5fae76; --diff: #4a4320;
+  --t0: 14px; --t1: 17px; --t2: 21px; --t3: 27px; --t4: 34px; --t5: 52px;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; background: var(--panel); }
+body { margin: 0; background: var(--panel); color: var(--ink); font: 400 var(--t1)/1.45 "Poppins", sans-serif; }
+button { font: inherit; color: inherit; }
+.wrap { width: 100%; max-width: 600px; margin: 0 auto; padding: 16px; }
+h1 { margin: 0 0 14px; font-size: var(--t1); font-weight: 600; letter-spacing: 0.02em; }
+#log { margin: 16px 0 0; font: 12px/1.5 var(--mono); color: var(--ink-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<link rel="stylesheet" href="upload.css">
+</head>
+<body>
+<main class="wrap">
+  <h1>Altimeter</h1>
+  <div id="upload"></div>
+  <pre id="log"></pre>
+</main>
+<script>
+/* ?mock=1: fake POST /api/upload and GET /api/upload/<id> in the browser, so upload.js runs its real XHR/fetch
+   code with no server. Progress is simulated with real timers at ~1.5 MB/s, then ~600 ms of "server reading". */
+if (new URLSearchParams(location.search).get("mock") === "1") (function () {
+  const RATE = 1.5 * 1048576, TICK = 100, TTL = 15 * 60;
+  const store = {};
+  const sanitize = (n) => n.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "t";
+
+  async function mockServer(files) {
+    if (!files.length) return [400, { error: "no files in the upload" }];
+    const exts = files.map((f) => (f.name.match(/\.([^.]+)$/) || [, ""])[1].toLowerCase());
+    const bad = files.find((f, i) => !["csv", "sqlite", "sqlite3", "db"].includes(exts[i]));
+    if (bad) return [400, { error: bad.name + ": only .csv, .sqlite or .db files" }];
+    const total = files.reduce((s, f) => s + f.size, 0);
+    if (total > 10 * 1048576) return [400, { error: "upload is over 10 MB" }];
+    let tables;
+    if (exts.some((e) => e !== "csv")) {
+      if (files.length > 1) return [400, { error: "send one SQLite file, or 1-8 CSV files" }];
+      tables = [{ name: "customers", rows: 1204 }, { name: "orders", rows: 8817 }, { name: "order_items", rows: 23410 }];
+    } else {
+      if (files.length > 8) return [400, { error: "at most 8 CSV files" }];
+      tables = [];
+      for (const f of files) {
+        const rows = f.size < 1048576 ? (await f.text()).split(/\r?\n/).filter((l) => l.trim()).length - 1 : Math.round(f.size / 48);
+        if (rows < 1) return [400, { error: f.name + ": no data rows" }];
+        tables.push({ name: sanitize(f.name), rows });
+      }
+    }
+    const id = Math.random().toString(36).slice(2, 14);
+    store[id] = { tables, kind: exts[0] === "csv" ? "csv" : "sqlite", t: Date.now() };
+    return [200, info(id)];
+  }
+  function info(id) {
+    const e = store[id];
+    e.t = Date.now();
+    return { db_id: "upload:" + id, kind: e.kind, tables: e.tables, expires_in_s: TTL };
+  }
+
+  class MockXHR {
+    constructor() { this.upload = {}; this.status = 0; this.responseText = ""; this._timers = []; }
+    open(method, url) { this._method = method; this._url = url; }
+    abort() { this._timers.forEach(clearInterval); this._timers = []; }
+    send(fd) {
+      const files = fd.getAll("files").filter((f) => f instanceof File);
+      const total = files.reduce((s, f) => s + f.size, 0) + 200;
+      let loaded = 0;
+      const iv = setInterval(() => {
+        loaded = Math.min(total, loaded + RATE * TICK / 1000);
+        this.upload.onprogress && this.upload.onprogress({ lengthComputable: true, loaded, total });
+        if (loaded >= total) {
+          clearInterval(iv);
+          this.upload.onload && this.upload.onload({});
+          const t = setTimeout(async () => {
+            const [status, body] = await mockServer(files);
+            this.status = status; this.responseText = JSON.stringify(body);
+            this.onload && this.onload({});
+          }, 600);
+          this._timers.push(t);
+        }
+      }, TICK);
+      this._timers.push(iv);
+    }
+  }
+  window.XMLHttpRequest = MockXHR;
+
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (url, init) => {
+    const m = String(url).match(/\/api\/upload\/([^/?#]+)$/);
+    if (!m) return realFetch(url, init);
+    const id = decodeURIComponent(m[1]);
+    if (!store[id]) return new Response(JSON.stringify({ error: "upload not found or expired" }), { status: 404 });
+    return new Response(JSON.stringify(info(id)), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+})();
+</script>
+<script src="upload.js"></script>
+<script>
+const log = document.getElementById("log");
+window.ctl = Upload.render(document.getElementById("upload"), {
+  onReady(dbId, info) { log.textContent = "onReady " + dbId + "\n" + JSON.stringify(info); },
+  onRemove(dbId) { log.textContent = "onRemove " + dbId; },
+  onExpire(dbId) { log.textContent = "onExpire " + dbId; },
+});
+</script>
+</body>
+</html>

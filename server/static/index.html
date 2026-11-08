@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#171a1f">
 <title>Altimeter</title>
 <link rel="icon" href="data:,">
+<link rel="stylesheet" href="joinmap.css">
+<link rel="stylesheet" href="sqldiff.css">
+<link rel="stylesheet" href="upload.css">
 <style>
 @font-face { font-family: "Poppins"; font-weight: 400; font-style: normal; font-display: swap; src: url(fonts/poppins-400.woff2) format("woff2"); }
 @font-face { font-family: "Poppins"; font-weight: 500; font-style: normal; font-display: swap; src: url(fonts/poppins-500.woff2) format("woff2"); }
@@ -69,6 +72,11 @@ main { padding-bottom: 48px; }
 #test { display: none; }
 body.test #check { display: none; }
 body.test #test { display: block; }
+/* tab change: the incoming panel slides from the side its tab sits on */
+@keyframes from-right { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes from-left { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+body.test.moved #test { animation: from-right 220ms var(--ease) both; }
+body.moved:not(.test) #check { animation: from-left 220ms var(--ease) both; }
 
 /* empty thread: three questions to try, as rows */
 .suggest { margin: 4px 0 0; }
@@ -94,8 +102,18 @@ body.test #test { display: block; }
 .run.collapsed .head .q small { display: none; }
 .run.collapsed .body { display: none; }
 .reply > section { padding: 12px 14px; border-top: 1px solid var(--rule); }
-.reading-row { display: grid; grid-template-columns: 150px 1fr; gap: 0 14px; align-items: center; }
+.reply > section.in { animation: arrive 260ms ease-out both; animation-delay: calc(var(--i, 0) * 90ms); }
+.reading-row { position: relative; display: grid; grid-template-columns: 150px 1fr; gap: 0 14px; align-items: center; overflow: hidden; }
+.reading-row > * { position: relative; z-index: 1; }
 .reading-row .read { min-width: 0; }
+/* clouds behind the dial: the layer's height follows this run's needle (Ask: in cloud; Cruise: above it) */
+.clouds { position: absolute; left: 0; right: 0; bottom: 0; height: 72%; z-index: 0; overflow: hidden; pointer-events: none; transform: translateY(100%); will-change: transform; }
+.clouds svg { position: absolute; left: 0; bottom: 0; width: 100%; height: 100%; }
+.clouds path { fill: var(--panel-3); }
+.clouds .l1 { opacity: 0.45; animation: drift 120s linear infinite; }
+.clouds .l2 { opacity: 0.6; animation: drift 90s linear infinite reverse; }
+.clouds .l3 { opacity: 0.8; animation: drift 70s linear infinite; }
+@keyframes drift { from { transform: translateX(0); } to { transform: translateX(-1200px); } }
 .reading-row .read .bandname { display: block; font-size: var(--t2); font-weight: 600; line-height: 1.1; }
 .reading-row .read b { display: block; margin-top: 2px; font-size: var(--t4); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
 .reading-row .read .meta { display: block; margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
@@ -116,13 +134,15 @@ body.test #test { display: block; }
 .arc-ask { stroke: var(--ask); }
 .arc-caution { stroke: var(--caution); }
 .arc-cruise { stroke: var(--cruise); }
-.tick-major { stroke: var(--ink); stroke-width: 2.5; }
-.tick-minor { stroke: var(--ink-2); stroke-width: 1.2; }
+/* ticks light as the needle passes them; those beyond it stay dim */
+.tick-major { stroke: var(--ink-2); stroke-width: 2.5; transition: stroke 120ms ease-out; }
+.tick-minor { stroke: var(--ink-3); stroke-width: 1.2; transition: stroke 120ms ease-out; }
+.tick-major.lit { stroke: var(--ink); }
+.tick-minor.lit { stroke: var(--ink-2); }
 .num { fill: var(--ink); font-size: 19px; font-weight: 500; text-anchor: middle; dominant-baseline: central; }
 .window { fill: #08090b; stroke: var(--rule); stroke-width: 1; }
 .wobble { transform-origin: 150px 150px; transform-box: view-box; }
-.needle { transform-origin: 150px 150px; transform-box: view-box; transform: rotate(-135deg); transition: transform var(--sweep) var(--ease); }
-.needle.snap { transition: none; }
+.needle { transform-origin: 150px 150px; transform-box: view-box; transform: rotate(-135deg); will-change: transform; }
 .needle-body { fill: var(--ink); stroke: var(--ink); stroke-width: 1; stroke-linejoin: round; transition: fill 200ms ease-out, stroke 200ms ease-out; }
 .hub { fill: var(--face); stroke: var(--ink); stroke-width: 2.5; transition: stroke 200ms ease-out; }
 .dial.idle .needle { opacity: 0.35; }
@@ -137,11 +157,8 @@ body.test #test { display: block; }
   font-size: 13.5cqw; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); pointer-events: none;
 }
 .slot { height: 2.1em; width: 0.62em; overflow: hidden; -webkit-mask-image: linear-gradient(transparent 24%, #000 40%, #000 60%, transparent 76%); mask-image: linear-gradient(transparent 24%, #000 40%, #000 60%, transparent 76%); }
-.reel { display: block; line-height: 1; text-align: center; transform: translateY(0.55em); transition: transform var(--sweep) var(--ease); }
+.reel { display: block; line-height: 1; text-align: center; transform: translateY(0.55em); will-change: transform; }
 .reel span { display: block; height: 1em; }
-.slot:nth-child(3) .reel { transition-duration: calc(var(--sweep) * 1.15); }
-.slot:nth-child(4) .reel { transition-duration: calc(var(--sweep) * 1.3); }
-.drum.snap .reel { transition: none; }
 .dot { width: 0.3em; text-align: center; line-height: 1; margin-top: -0.12em; }
 .drum.blank { color: var(--ink-3); }
 
@@ -192,6 +209,13 @@ details.why summary span { margin-left: auto; font-size: 12.5px; font-weight: 50
 .terms .track i.up { background: var(--cruise); }
 .terms .track i.down { background: var(--ask); }
 .terms .track em { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--ink-2); }
+/* opening Why: rows land in order, each bar grows from the zero line, the sum ticks up as they land */
+.terms li { --i: 0; opacity: 0; transition: opacity 220ms ease-out calc(var(--i) * 110ms); }
+.terms.go li { opacity: 1; }
+.terms .track i { transform: scaleX(0); transition: transform 360ms var(--ease) calc(var(--i) * 110ms + 80ms); }
+.terms .track i.up { transform-origin: left center; }
+.terms .track i.down { transform-origin: right center; }
+.terms.go .track i { transform: none; }
 .terms li.base { color: var(--ink-2); }
 .terms li.base .c { font-weight: 500; }
 .terms li.sum { border-bottom: 0; padding-top: 9px; }
@@ -296,12 +320,27 @@ select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--in
   content: ""; position: absolute; left: -4px; right: -4px; top: 52%; height: 4px; background: var(--ask);
   transform: scaleX(0); transform-origin: left center;
 }
-.ledger.go .was::after { animation: strike 380ms cubic-bezier(.5,0,.2,1) 420ms forwards; }
+.ledger.struck .was::after { animation: strike 380ms cubic-bezier(.5,0,.2,1) forwards; }
 .ledger .now { opacity: 0; transform: translateY(14px); }
-.ledger.go .now { animation: enter 420ms var(--ease) 840ms forwards; }
+.ledger.entered .now { animation: enter 420ms var(--ease) forwards; }
 .ledger .times { padding-bottom: 4px; font-size: var(--t2); font-weight: 600; color: var(--ask); opacity: 0; }
-.ledger.go .times { animation: show 300ms ease-out 1180ms forwards; }
+.ledger.rated .times { animation: show 300ms ease-out forwards; }
+.ledger .fig.live { color: var(--ink-2); }
 .ledger .what { flex-basis: 100%; min-width: 0; font: 13px/1.4 var(--mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* one counted row and its joined copies (real ids from the check): they fan out, then collapse back to one */
+.fan { flex-basis: 100%; min-width: 0; margin-top: 2px; font-size: 12.5px; color: var(--ink-2); }
+.fan .fcap { display: block; margin-bottom: 6px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fan .frow { display: flex; align-items: center; gap: 4px; }
+.fan .src { flex: none; max-width: 38%; padding-right: 6px; font: 600 12px/1.2 var(--mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fan .fc {
+  flex: 1 1 0; min-width: 0; height: 22px; max-width: 34px; border: 1px solid var(--caution); background: var(--diff);
+  opacity: 0; transform: translateX(var(--dx, 0px)) scale(0.85);
+  transition: opacity 180ms ease-out, transform 300ms var(--ease), background-color 300ms ease-out, border-color 300ms ease-out;
+}
+.fan .fc.on { opacity: 1; transform: none; }
+.fan.collapse .fc.dup { opacity: 0; transform: translateX(var(--dx, 0px)) scale(0.85); transition-duration: 260ms, 420ms; }
+.fan.once .fc.dup { opacity: 1; transform: none; background: transparent; border-color: var(--bezel); }
+.fan.once .fc.keep { border-color: var(--cruise); background: var(--panel-3); }
 @keyframes strike { to { transform: scaleX(1); } }
 @keyframes enter { to { opacity: 1; transform: none; } }
 @keyframes show { to { opacity: 1; } }
@@ -320,16 +359,43 @@ ol.checklist .re { flex: none; max-width: 60%; text-align: right; font-weight: 6
 ol.checklist .re.bad { color: var(--ask); }
 ol.checklist .re.ok { color: var(--cruise); }
 details.rewrite { margin-top: 12px; }
+
+/* schema of the selected database: one line until tapped */
+details.schema { margin: -4px 0 14px; border: 1px solid var(--rule); border-radius: 3px; }
+details.schema summary { padding: 9px 12px; font-size: var(--t0); font-weight: 600; cursor: pointer; list-style: none; }
+details.schema[open] summary { margin-bottom: 0; }
+details.schema summary:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+details.schema .tables { max-height: 50vh; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px; border-top: 1px solid var(--rule); }
+details.schema .t { padding: 8px 0; border-bottom: 1px solid var(--rule); }
+details.schema .t:last-child { border-bottom: 0; }
+details.schema .th { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+details.schema .tn { min-width: 0; font: 600 13.5px/1.4 var(--mono); overflow-wrap: anywhere; }
+details.schema .rc { flex: none; font-size: 12.5px; font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+details.schema .cols { margin: 3px 0 0; font: 12.5px/1.55 var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+details.schema .cols b { font-weight: 700; }
+details.schema .cols .link { white-space: nowrap; }
+details.schema .cols .fk { color: var(--ink-2); }
 .note { font-size: var(--t0); color: var(--ink-2); margin: 8px 0 0; }
 .intended { margin: 10px 0 0; max-width: 60ch; padding: 8px 12px; border: 1px solid var(--rule); border-radius: 3px; font-size: var(--t0); }
 .fixrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; }
 .copied { font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
+
+/* uploaded data, join map and SQL diff inside a check */
+#upload { margin: 22px 0 0; }
+.jmbox { --jm-bg: var(--panel-2); }
+.jmbox .jm { margin: 0 auto; }
+.diffbox { margin-top: 14px; }
+.diffbox .sd-code { font-size: 12.5px; }
+.read .bandname.uncal { font-size: var(--t0); font-weight: 600; line-height: 1.3; color: var(--ink-2); }
+.dial.uncal .arc { stroke: var(--ink-3); opacity: 0.5; }
 
 @media (max-width: 359px) { .reading-row { grid-template-columns: 120px 1fr; } }
 @media (prefers-reduced-motion: reduce) {
   .ledger .was::after { transform: scaleX(1); }
   .ledger .now, .ledger .times { opacity: 1; transform: none; }
   .dial.hold .wobble { animation: none; }
+  .clouds .l1, .clouds .l2, .clouds .l3 { animation: none; }
+  .terms li, .terms .track i, .fan .fc { opacity: 1; transform: none; }
   *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-delay: 0s !important; }
 }
 </style>
@@ -353,9 +419,11 @@ details.rewrite { margin-top: 12px; }
   <div id="check" role="tabpanel" aria-labelledby="tabCheck">
     <h2 id="presetsHead">Queries to check</h2>
     <ul class="presets" id="presets" aria-labelledby="presetsHead"></ul>
+    <div id="upload"></div>
     <form id="checkForm" autocomplete="off">
       <label for="checkDb">Database</label>
       <select id="checkDb"></select>
+      <details class="schema" id="checkSchema" hidden><summary></summary><div class="tables"></div></details>
       <label for="sql">SQL</label>
       <textarea id="sql" rows="6" spellcheck="false" autocapitalize="off" autocorrect="off" required></textarea>
       <button id="run" class="primary" type="submit">Run pre-flight check</button>
@@ -368,6 +436,7 @@ details.rewrite { margin-top: 12px; }
     <form id="flight" autocomplete="off">
       <label for="db">Database</label>
       <select id="db"></select>
+      <details class="schema" id="testSchema" hidden><summary></summary><div class="tables"></div></details>
       <label for="question">Question for the local model</label>
       <textarea id="question" maxlength="500" rows="2" required></textarea>
       <button id="ask" class="primary" type="submit">Run test flight</button>
@@ -377,6 +446,9 @@ details.rewrite { margin-top: 12px; }
   </div>
   <p id="announce" class="sr" aria-live="polite"></p>
 </main>
+<script src="joinmap.js"></script>
+<script src="sqldiff.js"></script>
+<script src="upload.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

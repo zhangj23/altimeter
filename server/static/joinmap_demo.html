@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join map</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="joinmap.css">
+<style>
+@font-face { font-family: "Poppins"; font-weight: 400; font-style: normal; font-display: swap; src: url(fonts/poppins-400.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 500; font-style: normal; font-display: swap; src: url(fonts/poppins-500.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 600; font-style: normal; font-display: swap; src: url(fonts/poppins-600.woff2) format("woff2"); }
+:root {
+  --panel: #171a1f; --panel-2: #1f232a; --panel-3: #282d35; --face: #0f1114; --bezel: #3a414b;
+  --ink: #e8e6e0; --ink-2: #9ca1a8; --ink-3: #6b7078; --rule: #343a43;
+  --ask: #cf5c4f; --caution: #d6a63e; --cruise: #5fae76;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  --ease: cubic-bezier(.3,.75,.25,1);
+}
+* { box-sizing: border-box; }
+html { background: var(--panel); }
+body { margin: 0; padding: 16px; color: var(--ink); font: 400 14px/1.5 "Poppins", system-ui, sans-serif; }
+h1 { font: 500 17px/1.3 "Poppins", system-ui, sans-serif; margin: 0 0 12px; }
+h2 { font: 500 15px/1.3 "Poppins", system-ui, sans-serif; margin: 0 0 4px; }
+.case { margin: 0 0 28px; }
+.q { color: var(--ink-2); margin: 0 0 8px; max-width: 68ch; }
+pre { font: 400 12px/1.45 var(--mono); color: var(--ink-2); background: var(--panel-3); padding: 10px 12px; margin: 0 0 12px; white-space: pre-wrap; word-break: break-word; max-width: 100%; }
+.card { background: var(--panel-2); border: 1px solid var(--rule); padding: 14px; --jm-bg: var(--panel-2); }
+.phone { width: 358px; max-width: 100%; }
+.panel { width: 100%; }
+.pair { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.pair .phone { flex: 0 0 358px; }
+.pair .panel { flex: 1 1 600px; min-width: 0; }
+.verify { font: 400 12px/1.5 var(--mono); color: var(--ink-2); margin: 8px 0 0; }
+.verify.bad { color: var(--ask); }
+.err { color: var(--ask); }
+</style>
+</head>
+<body>
+<main id="root"></main>
+<script src="joinmap.js"></script>
+<script>
+(function () {
+  var CASES = ["club_budget", "bird197", "bank_region_loans", "bird89"];
+  var qs = new URLSearchParams(location.search);
+  var only = qs.get("case"), width = qs.get("w") ? parseInt(qs.get("w"), 10) : null;
+  var root = document.getElementById("root");
+  window.__jm = {};
+
+  function getJSON(url, body) {
+    return fetch(url, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined)
+      .then(function (r) { if (!r.ok) throw new Error(url + " " + r.status); return r.json(); });
+  }
+
+  function firstFactor(check) {
+    var f = (check.findings || []).filter(function (x) { return x.fanout; })[0] || (check.findings || [])[0];
+    return check.flagged && f ? f.factor : null;
+  }
+
+  function show(preset, schema, check) {
+    var sec = document.createElement("section"); sec.className = "case";
+    var h = document.createElement("h2"); h.textContent = preset.id + " (" + preset.db_id + ")"; sec.appendChild(h);
+    var q = document.createElement("p"); q.className = "q"; q.textContent = preset.question; sec.appendChild(q);
+    var pre = document.createElement("pre"); pre.textContent = check.sql; sec.appendChild(pre);
+    var pair = document.createElement("div"); pair.className = "pair"; sec.appendChild(pair);
+    root.appendChild(sec);
+    var out = {};
+    function one(cls, w) {
+      var card = document.createElement("div"); card.className = "card " + cls;
+      if (w) card.style.width = w + "px";
+      pair.appendChild(card);
+      var r = JoinMap.render(card, schema, check, {});
+      delete r.svg;
+      out[cls] = r;
+      return r;
+    }
+    if (width) { one(width < 560 ? "phone" : "panel", width - 32); }
+    else { one("phone"); one("panel"); }
+    var expect = firstFactor(check);
+    var v = document.createElement("p"); v.className = "verify";
+    var got = out.phone || out.panel;
+    var ok = (expect == null && !got.factorLabel) || (expect != null && got.factorLabel === JoinMap.factorLabel(expect));
+    v.textContent = (expect == null ? "clean: no fan-out label" : "label " + got.factorLabel + " from finding.factor " + expect)
+      + (ok ? "" : "  MISMATCH") + (got.keys ? "  keys " + got.keys : "") + "  tables " + got.tables.join(", ")
+      + (got.neighbours.length ? "  neighbours " + got.neighbours.join(", ") : "");
+    if (!ok) v.classList.add("bad");
+    sec.appendChild(v);
+    window.__jm[preset.id] = { expectFactor: expect, ok: ok, renders: out };
+  }
+
+  getJSON("/api/presets").then(function (res) {
+    var by = {}; res.presets.forEach(function (p) { by[p.id] = p; });
+    var ids = only ? [only] : CASES;
+    if (!only) { var h1 = document.createElement("h1"); h1.textContent = "Join map, four pre-flight checks at phone and table widths"; root.appendChild(h1); }
+    return ids.reduce(function (chain, id) {
+      return chain.then(function () {
+        var p = by[id];
+        if (!p) throw new Error("preset not served: " + id);
+        return Promise.all([
+          getJSON("/api/schema?db_id=" + encodeURIComponent(p.db_id)),
+          getJSON("/api/check", { db_id: p.db_id, sql: p.sql, preset: p.id })
+        ]).then(function (r) { show(p, r[0], r[1]); });
+      });
+    }, Promise.resolve());
+  }).then(function () { window.__jm.done = true; }).catch(function (e) {
+    var p = document.createElement("p"); p.className = "err"; p.textContent = e.message; root.appendChild(p);
+    window.__jm.error = e.message; window.__jm.done = true;
+  });
+})();
+</script>
+</body>
+</html>

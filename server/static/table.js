@@ -9,8 +9,8 @@ const BANDS = [ // same edges as app.js
 ];
 const SHOW_ROWS = 5;
 const POSITION = { last_prompt: "last prompt token", last_gen: "last generated token", mean_gen: "mean over generated SQL tokens" };
-// Replay schedule, ms after the result is shown.
-const T = { z: 300, p: 1400, platt: 2400, ref: 3300, group0: 4000, groupGap: 750, total: 7200, swing: 7800, done: 9100 };
+// Replay schedule, ms after the result is shown. The needle sweeps at T.swing; the whole replay is done by T.done.
+const T = { z: 150, p: 600, ref: 950, group0: 1200, groupGap: 280, total: 2250, swing: 2400, done: 3600 };
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -52,45 +52,111 @@ function buildTape(ticks = "ticks", bands = "bands", names = "names") {
 const bandOf = (s) => BANDS.find((b) => s < b.to) || BANDS[BANDS.length - 1];
 const bandInk = (key) => `var(--${key})`;
 
-function parkCarriage() {
-  const c = $("carriage");
-  c.classList.add("snap");
-  c.style.transform = "translateX(0)";
-  void c.offsetWidth;
-  c.classList.remove("snap");
+/* ---------- motion primitives: every value they move comes from the payload ---------- */
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+function tween(from, to, ms, onFrame, onDone, ease = easeOut) { // one rAF loop; reduced motion jumps to the end
+  if (reduced() || ms <= 0 || from === to) { onFrame(to, 1); if (onDone) onDone(); return () => {}; }
+  let raf = 0;
+  const t0 = performance.now();
+  const step = (now) => {
+    const u = Math.min(1, (now - t0) / ms);
+    onFrame(from + (to - from) * ease(u), u);
+    if (u < 1) raf = requestAnimationFrame(step); else if (onDone) onDone();
+  };
+  raf = requestAnimationFrame(step);
+  return () => cancelAnimationFrame(raf);
 }
-
-function setGauge(score, mode) {
-  const band = $("band");
-  band.style.color = "";
-  band.className = "";
-  $("value").classList.toggle("blank", mode === "hold" || score == null || Number.isNaN(score));
-  if (mode === "hold") {
-    parkCarriage();
-    $("value").textContent = "--";
-    band.textContent = "Awaiting probe";
-    band.className = "awaiting";
-    $("tape").classList.remove("scored");
-    $("needle").className = "needle hold";
-    return;
-  }
-  if (score == null || Number.isNaN(score)) {
-    $("value").textContent = "--";
-    band.textContent = mode === "noprobe" ? "No probe" : "No reading";
-    $("tape").classList.remove("scored");
-    $("needle").className = "needle";
-    return;
-  }
-  const s = Math.min(1, Math.max(0, score));
-  const b = bandOf(s);
-  $("value").textContent = s.toFixed(2);
-  band.textContent = b.name;
-  band.style.color = bandInk(b.key);
-  $("tape").classList.add("scored");
-  $("needle").className = "needle on";
-  $("carriage").style.transform = `translateX(${(s * 100).toFixed(2)}%)`;
+// Damped spring: stiffness 70, damping ratio 0.72 (one small overshoot of ~4%, then it settles). Semi-implicit Euler.
+function spring(from, to, onFrame, onDone) {
+  if (reduced() || from === to) { onFrame(to); if (onDone) onDone(); return () => {}; }
+  const k = 70, c = 2 * 0.72 * Math.sqrt(k);
+  let x = from, v = 0, last = performance.now(), raf = 0;
+  const step = (now) => {
+    let dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    for (let n = 0; n < 4; n++) { // sub-steps keep it stable at any frame rate
+      const h = dt / 4;
+      v += (-k * (x - to) - c * v) * h;
+      x += v * h;
+    }
+    if (Math.abs(x - to) < 0.0005 && Math.abs(v) < 0.002) { onFrame(to); if (onDone) onDone(); return; }
+    onFrame(x);
+    raf = requestAnimationFrame(step);
+  };
+  raf = requestAnimationFrame(step);
+  return () => cancelAnimationFrame(raf);
 }
+const lightTicks = (ticksEl, s) => { // ticks up to the needle are lit
+  const ticks = ticksEl.children;
+  for (let i = 0; i < ticks.length; i++) ticks[i].classList.toggle("lit", s != null && i * 0.1 <= s + 1e-9);
+};
 
+/* ---------- gauge (same geometry as the phone); one object per tape so each view keeps its own state ---------- */
+function makeGauge(ids) {
+  const g = { score: null, mode: "none", cancel: () => {}, pos: 0 };
+  const E = () => ({ value: $(ids.value), band: $(ids.band), tape: $(ids.tape), ticks: $(ids.ticks), needle: $(ids.needle), car: $(ids.carriage) });
+  const place = (s) => {
+    const e = E();
+    e.car.style.transform = `translateX(${(s * 100).toFixed(2)}%)`;
+    lightTicks(e.ticks, s);
+    g.pos = s;
+    if (ids.clouds) cloudSet(cloudLevel(g.mode === "hold" || g.mode === "uncal" || g.score == null ? null : s)); // the cloud layer follows the needle
+  };
+  const showNumber = (s) => { const e = E(); e.value.textContent = s.toFixed(2); };
+  g.apply = (score, mode, animate) => { // the single source of truth for this tape; redrawn whenever its view shows
+    g.cancel();
+    g.score = score; g.mode = mode;
+    const e = E();
+    e.band.style.color = "";
+    e.band.className = "";
+    const none = mode === "hold" || score == null || Number.isNaN(score);
+    e.value.classList.toggle("blank", none);
+    if (mode === "hold") {
+      place(0);
+      e.value.textContent = "--";
+      e.band.textContent = "Awaiting probe";
+      e.band.className = "awaiting";
+      e.tape.classList.remove("scored");
+      e.needle.className = "needle hold";
+      return;
+    }
+    if (none) {
+      e.value.textContent = "--";
+      e.band.textContent = mode === "noprobe" ? "No probe" : "No reading";
+      e.tape.classList.remove("scored");
+      e.needle.className = "needle";
+      lightTicks(e.ticks, null);
+      return;
+    }
+    const s = Math.min(1, Math.max(0, score));
+    const b = bandOf(s);
+    const uncal = mode === "uncal"; // uploaded data: the number, no band and no band colour
+    e.tape.classList.toggle("scored", !uncal);
+    e.needle.className = "needle on";
+    const settle = () => {
+      showNumber(s);
+      e.band.textContent = uncal ? (g.note || UNCAL) : b.name;
+      e.band.style.color = uncal ? "var(--ink-2)" : bandInk(b.key);
+      place(s);
+    };
+    if (!animate) { settle(); return; }
+    e.band.textContent = "";
+    g.running = true;
+    const stop = spring(0, s, (x) => { place(x); showNumber(Math.max(0, x)); }, () => { g.running = false; settle(); }); // number counts with the sweep
+    g.cancel = () => { stop(); g.running = false; };
+  };
+  g.sync = () => { if (!g.running) g.apply(g.score, g.mode, false); }; // a view that was hidden shows the latest reading
+  return g;
+}
+const G = {
+  main: makeGauge({ value: "value", band: "band", tape: "tape", ticks: "ticks", needle: "needle", carriage: "carriage", clouds: true }),
+  ins: makeGauge({ value: "insvalue", band: "insband", tape: "instape", ticks: "insticks", needle: "insneedle", carriage: "inscarriage" }),
+};
+const setGauge = (score, mode, animate) => G.main.apply(score, mode, animate);
+const setInsGauge = (score, mode, animate) => G.ins.apply(score, mode, animate);
+
+const dbName = (d) => (typeof d === "string" && d.startsWith("upload:") ? "uploaded data" : d);
+const UNCAL = "Needle not calibrated for uploaded data";
 function needleOf(r) {
   if (!r || r.probe == null) return null;
   const v = typeof r.probe === "object" ? Number(r.probe.needle) : Number(r.probe);
@@ -116,13 +182,13 @@ function resultTable(columns, rows) {
 
 function renderQuestion(db_id, question) {
   const a = $("answer");
-  a.replaceChildren(el("h2", null, question), el("p", "route", `${db_id} · local`));
+  a.replaceChildren(el("h2", null, question), el("p", "route", `${dbName(db_id)} · local`));
   return a;
 }
 
 function renderAnswer(r) {
   const a = renderQuestion(r.db_id, r.question);
-  a.querySelector(".route").textContent = `${r.db_id}${r.fake ? " · fake worker" : ""} · ${fx(r.gen_seconds, 1)} s`;
+  a.querySelector(".route").textContent = `${dbName(r.db_id)}${r.fake ? " · fake worker" : ""} · ${fx(r.gen_seconds, 1)} s`;
   a.append(el("pre", "sql", r.sql || "(no SQL generated)"));
   if (r.error) a.append(el("p", "err", r.timed_out ? `Timed out: ${r.error}` : r.error));
   else if (r.rows) {
@@ -196,10 +262,23 @@ function waterfall(ex) {
     bar.dataset.t = t + 60;
     track.append(bar);
   });
-  const tot = row("Needle logit", "", minus(ex.logit.toFixed(2)), T.total);
-  const tm = el("i", "mark");
-  tm.style.left = pct(ex.logit) + "%";
-  tot.append(tm);
+  // the running sum: shown from the baseline on, its value and mark move as each group lands
+  const tot = row("Needle logit", "", minus(ex.stack_ref.toFixed(2)), T.ref + 120);
+  const carrier = el("i", "markw");
+  carrier.style.transform = `translateX(${pct(ex.stack_ref)}%)`;
+  carrier.append(el("i", "mark"));
+  tot.append(carrier);
+  const totVal = tot.parentNode.querySelector(".val");
+  // the last group finishes landing at `end`; from then on the row shows the worker's exact logit (the sum line's figure)
+  const end = T.group0 + Math.max(0, ex.groups.length - 1) * T.groupGap + 60 + 380;
+  wf.odometer = (t) => { // value at replay time t (ms): baseline + every group that has landed by then, partially while landing
+    let s = ex.stack_ref;
+    if (t >= end) s = ex.logit;
+    else ex.groups.forEach((g, k) => { const u = Math.min(1, Math.max(0, (t - (T.group0 + k * T.groupGap + 60)) / 380)); s += g.value * easeOut(u); });
+    totVal.textContent = minus(s.toFixed(2));
+    carrier.style.transform = `translateX(${pct(s)}%)`;
+  };
+  wf.odometer.end = end;
 
   const zero = el("i", "zero");
   zero.style.left = `calc(10.3rem + (100% - 10.3rem - 5.4rem) * ${pct(0) / 100})`;
@@ -225,7 +304,20 @@ function waterfall(ex) {
     `${minus(ex.stack_ref.toFixed(2))} ${ex.groups.map((g) => sx(g.value, 2).replace(/^([+−])/, "$1 ")).join(" ")} = ${minus(ex.logit.toFixed(2))} → needle ${ex.needle.toFixed(2)}`);
   total.dataset.t = T.swing;
   wrap.append(total);
+  wrap.odometer = wf.odometer;
   return wrap;
+}
+let odoStop = () => {};
+function runOdometer(fn, from, to) { // drives fn(t) over replay time [from, to], always on to the last landing
+  odoStop();
+  if (!fn) return;
+  to = Math.max(to, fn.end || 0);
+  if (reduced()) { fn(to); return; }
+  let raf = 0;
+  const t0 = performance.now() - from;
+  const step = (now) => { const t = now - t0; fn(Math.min(t, to)); if (t < to) raf = requestAnimationFrame(step); };
+  raf = requestAnimationFrame(step);
+  odoStop = () => cancelAnimationFrame(raf);
 }
 
 function recordBlock(ex, r) {
@@ -243,11 +335,14 @@ function renderExplain(r) {
   col.replaceChildren();
   const ex = r.explain;
   if (!ex) {
+    col.odometer = null;
     const msg = r.probe == null ? "No probe loaded, so no score to break down." : "This result carries no breakdown.";
     col.append(el("p", "noex", msg));
     return false;
   }
-  col.append(verdictBlock(ex), waterfall(ex), recordBlock(ex, r));
+  const wf = waterfall(ex);
+  col.append(verdictBlock(ex), wf, recordBlock(ex, r));
+  col.odometer = wf.odometer;
   return true;
 }
 
@@ -289,30 +384,76 @@ function stackTable(ex) { // one row per learned weight: logit = intercept + Σ 
     return td;
   };
   const ref = el("tr", "ref");
+  ref.style.setProperty("--i", 0);
   ref.append(el("td", "lab", "Intercept"));
   if (hasW) ref.append(el("td", "n", ""));
   ref.append(el("td", "n", sx(b0, 3)), cbar(b0));
   tb.append(ref);
   let sum = b0;
-  for (const x of terms) {
+  const landed = [b0]; // running sum after each row, for the odometer
+  terms.forEach((x, i) => {
     const tr = el("tr");
+    tr.style.setProperty("--i", i + 1);
     tr.append(el("td", "lab", (INPUT_WORDS[x.name] || (() => x.name))(ex)));
     if (hasW) tr.append(el("td", "n", sx(x.weight, 3)));
     tr.append(el("td", "n", sx(x.contribution, 3)), cbar(x.contribution));
     tb.append(tr);
     sum += x.contribution;
-  }
+    landed.push(sum);
+  });
   const tot = el("tr", "sum");
+  tot.style.setProperty("--i", 1); // the total row is there from the start; its number and bar follow the rows
   tot.append(el("td", null, "Logit"));
   if (hasW) tot.append(el("td"));
-  tot.append(el("td", "n", minus(sum.toFixed(3))), cbar(sum, "sum"));
+  const sumCell = el("td", "n", minus(sum.toFixed(3)));
+  const sumBar = cbar(sum, "sum");
+  tot.append(sumCell, sumBar);
   tb.append(tot);
   t.append(th, tb);
-  return { table: t, sum, hasW, n: terms.length };
+  const bar = sumBar.querySelector(".cbar");
+  bar.style.transition = "none";
+  const ROW = 90; // ms between rows (--rowgap)
+  const odometer = (ms) => { // the logit cell and its bar at cascade time ms: intercept + rows landed so far
+    let s = b0;
+    terms.forEach((x, i) => { s += x.contribution * easeOut(Math.min(1, Math.max(0, (ms - ((i + 1) * ROW + 90)) / 380))); });
+    sumCell.textContent = minus(s.toFixed(3));
+    const w = (Math.abs(s) / maxAbs) * 50;
+    bar.className = "cbar " + (s >= 0 ? "up" : "down");
+    bar.style.width = w + "%";
+    bar.style.left = s >= 0 ? "50%" : 50 - w + "%";
+    bar.style.transform = "none";
+  };
+  return { table: t, sum, hasW, n: terms.length, odometer, end: (terms.length + 1) * ROW + 470 };
 }
 
-function renderHow(ex, r) {
+// z -> sigmoid(z): the needle's last step, drawn as the curve with this answer's point on it.
+function sigmoidFigure(logit, needle, caption) {
+  const W = 190, H = 84, m = { l: 8, r: 8, t: 8, b: 16 };
+  const X = (z) => m.l + ((z + 5) / 10) * (W - m.l - m.r);
+  const Y = (p) => m.t + (1 - p) * (H - m.t - m.b);
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, "aria-hidden": "true" });
+  svg.append(sv("line", { class: "ax", x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0) }), sv("line", { class: "ax", x1: X(0), x2: X(0), y1: Y(0), y2: Y(1) }));
+  svg.append(sv("line", { class: "half", x1: m.l, x2: W - m.r, y1: Y(0.5), y2: Y(0.5) }));
+  let d = "";
+  for (let z = -5; z <= 5.0001; z += 0.25) d += `${d ? "L" : "M"}${X(z).toFixed(1)},${Y(1 / (1 + Math.exp(-z))).toFixed(1)}`;
+  const curve = sv("path", { class: "curve", d });
+  const zc = Math.max(-5, Math.min(5, logit));
+  svg.append(curve, sv("line", { class: "drop", x1: X(zc), x2: X(zc), y1: Y(0), y2: Y(needle) }),
+    sv("line", { class: "drop", x1: X(0), x2: X(zc), y1: Y(needle), y2: Y(needle) }),
+    sv("circle", { class: "pt", cx: X(zc), cy: Y(needle), r: 3.5 }),
+    sv("text", { x: X(0) + 3, y: Y(1) + 2, "text-anchor": "start" }, "1"), sv("text", { x: X(0) + 3, y: Y(0.5) - 2 }, "0.5"),
+    sv("text", { x: m.l, y: H - 2 }, "−5"), sv("text", { x: W - m.r, y: H - 2, "text-anchor": "end" }, "+5"),
+    sv("text", { x: X(0), y: H - 2, "text-anchor": "middle" }, "logit"));
+  const fig = el("div", "sig");
+  fig.append(svg, el("p", "dsum", caption));
+  fig.curve = curve;
+  return fig;
+}
+
+let howStop = () => {};
+function renderHow(ex, r, animate) {
   const col = $("howcol");
+  howStop();
   col.replaceChildren();
   if (!ex) { col.append(el("p", "noex", "Nothing to show until a scored answer arrives.")); return; }
   const card = ex.model_card || {};
@@ -324,8 +465,9 @@ function renderHow(ex, r) {
   if (synthetic) { const route = el("p", "route"); route.append(el("span", "synth", "Synthetic test probe: random weights, not evidence")); L.append(route); }
   const st = stackTable(ex);
   const s2 = el("div", "how-block");
-  s2.append(el("h3", null, `The needle: logistic regression over ${st.n} inputs`), st.table,
-    el("p", "dsum", `logit ${minus(st.sum.toFixed(3))} → needle ${ex.needle.toFixed(2)}${Math.abs(st.sum - ex.logit) > 1e-6 ? " (worker reports logit " + minus(ex.logit.toFixed(3)) + ")" : ""}`));
+  const fig = sigmoidFigure(ex.logit, ex.needle,
+    `logit ${minus(st.sum.toFixed(3))} → needle ${ex.needle.toFixed(2)}${Math.abs(st.sum - ex.logit) > 1e-6 ? " (worker reports logit " + minus(ex.logit.toFixed(3)) + ")" : ""}`);
+  s2.append(el("h3", null, `The needle: logistic regression over ${st.n} inputs`), st.table, fig);
   L.append(s2);
   L.append(el("p", "fact", "Both stages are logistic regression: every prediction is an exact sum of weight × input. Chosen for that auditability; not compared against nonlinear models."));
 
@@ -337,8 +479,9 @@ function renderHow(ex, r) {
   b1.append(el("h3", null, `The probe: ${Number(nD).toLocaleString("en-US")} weights over layer ${ex.layer}`));
   const maxAbs = Math.max(1e-12, ...dims.map((d) => Math.abs(d.c)));
   const list = el("div", "dims");
-  for (const d of dims) {
+  for (const [di, d] of dims.entries()) {
     const rowE = el("div", "drow");
+    rowE.style.setProperty("--i", di);
     const tr = el("div", "dtrack");
     const bar = el("i", "dbar " + (d.c >= 0 ? "up" : "down"));
     const w = (Math.abs(d.c) / maxAbs) * 50;
@@ -387,6 +530,30 @@ function renderHow(ex, r) {
   }
   R.append(a);
   col.append(L, R);
+
+  // cascade: rows land, bars grow, the logit cell ticks up row by row, then the sigmoid curve draws to the needle
+  const curve = fig.curve;
+  const len = curve.getTotalLength ? curve.getTotalLength() : 0;
+  const finish = () => { st.odometer(1e9); st.table.classList.add("on"); list.classList.add("on"); fig.classList.add("on"); curve.style.strokeDasharray = ""; curve.style.strokeDashoffset = ""; };
+  if (!animate || reduced() || !len) { finish(); return; }
+  curve.style.strokeDasharray = `${len}`;
+  curve.style.strokeDashoffset = `${len}`;
+  curve.style.transition = "none";
+  let raf = 0;
+  const t0 = performance.now();
+  const timers = [];
+  const step = (now) => { const ms = now - t0; st.odometer(Math.min(ms, st.end)); if (ms < st.end) raf = requestAnimationFrame(step); };
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    st.table.classList.add("on");
+    list.classList.add("on");
+    raf = requestAnimationFrame(step);
+    timers.push(setTimeout(() => {
+      curve.style.transition = "stroke-dashoffset 600ms cubic-bezier(.4,0,.2,1)";
+      curve.style.strokeDashoffset = "0";
+      timers.push(setTimeout(() => fig.classList.add("on"), 560));
+    }, st.end - 200));
+  }));
+  howStop = () => { cancelAnimationFrame(raf); timers.forEach(clearTimeout); howStop = () => {}; };
 }
 
 /* ---------- replay ---------- */
@@ -396,16 +563,21 @@ function later(ms, fn) { timers.push(setTimeout(fn, reduced() ? 0 : ms)); }
 function play(r, animate) {
   clearTimers();
   stopClock();
+  pipeFinish(r);
   lastShown = r;
   setProbeLine(r);
   renderAnswer(r);
   const has = renderExplain(r);
-  renderHow(r.explain, r);
+  renderHow(r.explain, r, animate && document.body.classList.contains("how"));
   const nd = needleOf(r);
+  const gm = r.calibrated === false ? "uncal" : "noprobe";
+  G.main.note = G.ins.note = r.calibration_note || UNCAL;
   renderInside(r, animate ? "animate" : "still");
   if (!has || !animate) {
     for (const n of document.querySelectorAll("#excol .step, #excol .bar")) n.classList.add("on");
-    setGauge(nd, "noprobe");
+    odoStop();
+    if ($("excol").odometer) $("excol").odometer(Infinity); // settled: the exact logit, no replay
+    setGauge(nd, gm, false);
     $("status").textContent = has ? "Scored before the SQL ran." : nd == null ? "Probe not loaded." : "";
     playing = false;
     return;
@@ -415,22 +587,108 @@ function play(r, animate) {
   setGauge(null, "hold");
   $("status").textContent = "Scored before the SQL ran.";
   for (const n of document.querySelectorAll("#excol .step, #excol .bar")) later(Number(n.dataset.t || 0), () => n.classList.add("on"));
-  later(T.swing, () => setGauge(nd, "noprobe"));
+  runOdometer($("excol").odometer, 0, T.total);
+  later(T.swing, () => setGauge(nd, gm, true));
   later(T.done, () => {
     playing = false;
     if (deferred) { const d = deferred; deferred = null; play(d, true); }
   });
 }
 
+/* ---------- pipeline strip: the worker's stages with their measured time ----------
+   Live: each cell's clock is the time between the stage messages this screen received. On the result the cells
+   settle to the worker's own measurements (gen_seconds, timing.score_s + layers_s, exec_seconds,
+   audit.annotate_seconds); a stage the payload does not time keeps the time measured here. */
+const PIPE_SCALE_S = 8; // a full bar is 8 s, the end-to-end budget per question
+const PIPE_STAGES = [
+  ["generating", "Generating SQL"], ["scoring", "Probe scoring"], ["executing", "Running the query"], ["audit", "Checking joins"],
+];
 const STAGE = { generating: "Generating SQL", scoring: "Scoring it from the model's hidden states", executing: "Running the SQL on SQLite", sampling: "Sampling other readings" };
 let stageLabel = STAGE.generating;
-const drawClock = () => { $("status").textContent = `${stageLabel} · ${((performance.now() - workingSince) / 1000).toFixed(1)} s`; };
+let pipe = null; // { cells: Map(stage -> {node, t, pf}), active, startedAt, measured: Map(stage -> s) }
+
+function pipeBuild(stages) {
+  const box = $("pipe");
+  box.replaceChildren();
+  pipe = { cells: new Map(), active: null, startedAt: 0, measured: new Map() };
+  for (const [key, name] of stages) {
+    const c = el("div", "pc");
+    const pb = el("span", "pb");
+    const pf = el("i", "pf");
+    pb.append(pf);
+    const t = el("span", "pt", "");
+    c.append(el("span", "pn", name), t, pb);
+    box.append(c);
+    pipe.cells.set(key, { node: c, t, pf });
+  }
+}
+const pipeBar = (cell, s) => { cell.pf.style.transform = `scaleX(${Math.min(1, Math.max(0, s / PIPE_SCALE_S)).toFixed(4)})`; };
+function pipeSettle(stage, s) { // a stage ends: its cell keeps the measured seconds
+  const c = pipe && pipe.cells.get(stage);
+  if (!c) return;
+  c.node.classList.remove("live");
+  c.node.classList.add("done");
+  if (s != null) { pipe.measured.set(stage, s); c.t.textContent = s < 0.005 ? "<0.01 s" : `${s.toFixed(s < 10 ? 2 : 1)} s`; pipeBar(c, s); }
+}
+function pipeGo(stage) { // a stage message: close the running cell with this screen's clock, start the next
+  if (!pipe) return;
+  const now = performance.now();
+  if (pipe.active) pipeSettle(pipe.active, (now - pipe.startedAt) / 1000);
+  if (!pipe.cells.has(stage)) { // sampling (two readings) is only announced when it runs
+    const c = el("div", "pc");
+    const pb = el("span", "pb"), pf = el("i", "pf"), t = el("span", "pt", "");
+    pb.append(pf);
+    c.append(el("span", "pn", STAGE[stage] || String(stage)), t, pb);
+    $("pipe").append(c);
+    pipe.cells.set(stage, { node: c, t, pf });
+  }
+  pipe.active = stage;
+  pipe.startedAt = now;
+  pipe.cells.get(stage).node.classList.add("live");
+}
+function pipeTick() {
+  if (!pipe || !pipe.active) return;
+  const c = pipe.cells.get(pipe.active);
+  const s = (performance.now() - pipe.startedAt) / 1000;
+  c.t.textContent = `${s.toFixed(1)} s`;
+  pipeBar(c, s);
+}
+function pipeFinish(r) { // the result: every cell settles to the worker's numbers where it has them
+  if (!pipe) {
+    if (!r || r.gen_seconds == null) { $("pipe").replaceChildren(); return; }
+    pipeBuild(PIPE_STAGES); // a replayed result (reconnect): draw the strip from the payload alone
+  }
+  if (pipe.active) pipeSettle(pipe.active, (performance.now() - pipe.startedAt) / 1000);
+  pipe.active = null;
+  const tm = (r && r.timing) || {};
+  const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const score = num(tm.score_s) != null || num(tm.layers_s) != null ? (num(tm.score_s) || 0) + (num(tm.layers_s) || 0) : null;
+  const audit = r && r.audit ? num(r.audit.annotate_seconds) : null;
+  const server = { generating: num(r && r.gen_seconds), scoring: score, executing: num(r && r.exec_seconds), audit, sampling: num(tm.sampling_s) };
+  const inputs = r && r.explain && r.explain.stack_terms ? r.explain.stack_terms.length : null;
+  const layer = r && r.explain ? r.explain.layer : null;
+  if (layer != null) {
+    const c = pipe.cells.get("scoring");
+    c.node.firstChild.textContent = `Probe, layer ${layer}`;
+    if (inputs) c.node.title = `Layer ${layer} probe stacked with ${inputs - 1} other inputs`;
+  }
+  for (const [key, c] of pipe.cells) {
+    const s = server[key] != null ? server[key] : pipe.measured.get(key);
+    if (s != null) pipeSettle(key, s);
+    else { c.node.classList.remove("live"); c.node.classList.add("done", "skip"); c.t.textContent = key === "scoring" ? "no probe" : "not run"; pipeBar(c, 0); }
+  }
+  const total = (r && r.timing && num(r.timing.worker_s)) || null;
+  if (total != null) { const c = pipe.cells.get("audit"); c.node.title = `Worker total ${total.toFixed(2)} s`; }
+}
+
+const drawClock = () => { $("status").textContent = `${stageLabel} · ${((performance.now() - workingSince) / 1000).toFixed(1)} s`; pipeTick(); };
 
 function showWorking(job, live) {
   if (live) panelOff(); // a live job returns the screen to the live view
   setCheck(false); // a new Ask job ends the check reveal
   if (playing) return; // the queue line shows it; the replay finishes first
   clearTimers();
+  odoStop();
   setHow(false);
   renderQuestion(job.db_id, job.question).append(el("pre", "sql", "Generating SQL"));
   $("excol").replaceChildren(el("p", "noex", "Awaiting probe."));
@@ -439,6 +697,8 @@ function showWorking(job, live) {
   setGauge(null, "hold");
   workingSince = performance.now();
   stageLabel = STAGE.generating;
+  pipeBuild(PIPE_STAGES);
+  pipeGo("generating");
   stopClock();
   drawClock();
   clock = setInterval(drawClock, 100);
@@ -447,6 +707,7 @@ function showStage(m) {
   if (currentJob && m.job && m.job.id !== currentJob.id) return;
   stageLabel = STAGE[m.stage] || String(m.stage);
   if (!clock) return;
+  pipeGo(m.stage);
   drawClock();
   const pre = document.querySelector("#answer pre.sql");
   if (pre && m.stage !== "generating") pre.textContent = "SQL written. Shown once scored.";
@@ -587,18 +848,37 @@ function fanStrip(fo, f, h) {
   grid.append(el("span"));
   for (const v of cl.labels) grid.append(el("span", "h", v));
   const n = new Map(g.cells.map((c) => [c[0] * 100000 + c[1], c[2]]));
-  const cells = [];
+  const cells = []; // in fan order: row by row, each row's first joined row first (the one that stays after the fix)
+  const heads = [];
   g.rows.forEach((_, r) => {
-    grid.append(el("span", "rh", rl.labels[r]));
+    const rh = el("span", "rh", rl.labels[r]);
+    heads.push(rh);
+    grid.append(rh);
+    let first = true;
     g.cols.forEach((_, k) => {
       const slot = el("span", "slot");
       const v = n.get(r * 100000 + k);
-      if (v) { const c = el("i", "c", v > 1 ? String(v) : null); slot.append(c); cells.push(c); }
+      if (v) {
+        const c = el("i", "c " + (first ? "keep" : "dup"), v > 1 ? String(v) : null);
+        c.dataset.row = r;
+        slot.append(c);
+        cells.push(c);
+        first = false;
+      }
       grid.append(slot);
     });
   });
   const box = el("div", "fbox");
   box.append(el("p", "fcap", cap), grid);
+  // --dx: how far each copy sits from its row's first cell, so it can fan out from there and collapse back
+  const measure = () => {
+    const firstX = new Map();
+    for (const c of cells) {
+      const x = c.parentNode.offsetLeft;
+      if (!firstX.has(c.dataset.row)) firstX.set(c.dataset.row, x);
+      c.style.setProperty("--dx", `${(firstX.get(c.dataset.row) - x).toFixed(1)}px`);
+    }
+  };
 
   const factor = el("div", "factor");
   const agg = f.aggregate && f.aggregate.length <= 32 ? f.aggregate : "The aggregate";
@@ -630,8 +910,32 @@ function fanStrip(fo, f, h) {
     const ch = Math.max(0.55 * rem, Math.min(2.6 * rem, (0.26 * H - cap - 1.2 * rem) / (Rn + 1) - 2));
     grid.style.gridTemplateColumns = `auto repeat(${C}, ${cw.toFixed(1)}px)`;
     grid.style.setProperty("--ch", `${ch.toFixed(1)}px`);
+    measure();
   };
-  return { node, cells, size };
+  return { node, cells, heads, grid, size };
+}
+
+// Tweens a headline number shown as text ("355", "116.6527", "1,234"): same decimals, same grouping.
+function numberText(text) {
+  const s = String(text);
+  if (!/^-?[\d,]*\.?\d+$/.test(s)) return null;
+  const v = Number(s.replace(/,/g, ""));
+  if (!Number.isFinite(v)) return null;
+  const dec = (s.split(".")[1] || "").length;
+  const grouped = s.includes(",");
+  return { v, fmt: (x) => (grouped ? x.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec }) : x.toFixed(dec)) };
+}
+
+// Schemas for the join map, one fetch per database (uploads are not cached: they expire).
+const ckSchemas = new Map();
+function ckSchema(db) {
+  if (!db) return Promise.resolve(null);
+  if (!ckSchemas.has(db) || db.startsWith("upload:")) {
+    const p = fetch(`api/schema?db_id=${encodeURIComponent(db)}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    ckSchemas.set(db, p);
+    p.then((x) => { if (!x) ckSchemas.delete(db); });
+  }
+  return ckSchemas.get(db);
 }
 
 function showCheck(m, animate) {
@@ -651,7 +955,7 @@ function showCheck(m, animate) {
   const db = c.db_id || job.db_id || "";
   const pre = presets.find((p) => p.db_id === db && (p.question === job.question || p.sql === c.sql));
   const label = pre ? pre.label : "";
-  const bits = [db, label].filter(Boolean);
+  const bits = [dbName(db), label].filter(Boolean);
   col.append(el("p", "route", bits.join(" · ")), el("h2", null, job.question || label || `SQL sent for a pre-flight check on ${db}`));
 
   const h = c.headline;
@@ -661,16 +965,23 @@ function showCheck(m, animate) {
   const orig = c.original || {};
   let chars = 0;
 
-  // fan-out grid (first finding with one): cells fill one by one, then the factor line, then the strike
+  // fan-out grid (first finding with one). The story, in order: the source rows appear; each fans out into its
+  // joined copies while the number as written climbs; the copies collapse back onto one row each while the
+  // corrected number counts down from it; the copies return hollow; the strike; the ratio; the why.
   const fo = flagged ? (c.findings || []).map((f) => f.fanout).find((x) => x && x.grid && x.grid.cells && x.grid.cells.length) : null;
   const fanN = fo ? fo.grid.cells.length : 0;
-  const stag = Math.min(55, 2800 / Math.max(1, fanN));
+  const stag = Math.min(45, 1100 / Math.max(1, fanN));
   const K = { ...CK }, Q = { ...CALM };
+  let fanEnd = 0;
   if (fo) {
-    const g0 = h ? 800 : 700;
-    const factor = g0 + 300 + (fanN - 1) * stag + 160 + 300;
-    Object.assign(K, { fan: g0, cells: g0 + 300, factor, hl: factor + 300, strike: factor + 900, after: factor + 1600, ratio: factor + 2400, why: factor + 3200 });
-    Object.assign(Q, { fan: g0, cells: g0 + 300, factor, word: factor + 700, why: factor + 1300 });
+    const g0 = h ? 300 : 250;
+    fanEnd = g0 + 200 + (fanN - 1) * stag + 300;
+    const collapse = fanEnd + 350;
+    Object.assign(K, { before: g0 - 50, fan: g0, cells: g0 + 200, hl: fanEnd + 100, factor: fanEnd + 150, collapse, after: collapse,
+      once: collapse + 480, strike: collapse + 650, ratio: collapse + 900, why: collapse + 1100 });
+    Object.assign(Q, { fan: g0, cells: g0 + 200, factor: fanEnd + 150, word: fanEnd + 500, why: fanEnd + 900 });
+  } else if (flagged && h) {
+    Object.assign(K, { before: 250, hl: 700, after: 1000, strike: 1500, ratio: 1800, why: 2100 });
   }
 
   if (flagged && h) {
@@ -680,11 +991,23 @@ function showCheck(m, animate) {
     }
     const before = el("div", "rv before");
     const bb = el("b");
-    bb.append(el("span", "txt", h.before_text), el("i", "strike"));
+    const bTxt = el("span", "txt", h.before_text);
+    bb.append(bTxt, el("i", "strike"));
     before.append(el("small", null, "As written"), bb);
     const after = el("div", "rv");
-    after.append(el("small", null, "Corrected"), el("b", null, h.after_text));
+    const aB = el("b", null, h.after_text);
+    after.append(el("small", null, "Corrected"), aB);
     reveal.append(ph(before, K.before), ph(after, K.after, "ph after"));
+    const nb = numberText(h.before_text), na = numberText(h.after_text);
+    if (anim && nb) { // climbs from 0 as the copies land (or over 600 ms without a grid)
+      bTxt.textContent = nb.fmt(0);
+      const t0 = fo ? K.cells : K.before, dur = fo ? Math.max(400, fanEnd - K.cells) : 600;
+      at(t0, () => { bb.classList.add("live"); tween(0, nb.v, dur, (x) => { bTxt.textContent = nb.fmt(x); }, () => { bb.classList.remove("live"); bTxt.textContent = h.before_text; }); });
+    }
+    if (anim && nb && na) { // counts down from the inflated number to the corrected one
+      aB.textContent = nb.fmt(nb.v);
+      at(K.after, () => { aB.classList.add("live"); tween(nb.v, na.v, 560, (x) => { aB.textContent = na.fmt(x); }, () => { aB.classList.remove("live"); aB.textContent = h.after_text; }); });
+    }
     at(K.strike, () => before.classList.add("struck"));
     chars = h.before_text.length + h.after_text.length;
     const rw = ratioWords(h);
@@ -723,7 +1046,11 @@ function showCheck(m, animate) {
     fitNumbers(reveal, chars);
     ph(fan.node.firstChild, T0.fan);
     ph(fan.node.lastChild, T0.factor);
-    fan.cells.forEach((x, i) => at(T0.cells + i * stag, () => x.classList.add("on")));
+    fan.cells.forEach((x, i) => at(T0.cells + i * stag, () => { x.classList.add("on"); if (x.classList.contains("keep")) fan.heads[Number(x.dataset.row)].classList.add("src"); }));
+    if (h && anim) { // collapse onto one per row, then the duplicates come back hollow
+      at(K.collapse, () => fan.grid.classList.add("collapse"));
+      at(K.once, () => { fan.grid.classList.remove("collapse"); fan.grid.classList.add("once"); });
+    } else if (h) fan.grid.classList.add("once");
   }
 
   const body = el("div", "ck-body");
@@ -732,10 +1059,21 @@ function showCheck(m, animate) {
   body.append(left, why);
   col.append(body);
 
-  // why: verdict, plain-English explanation, the auditor's counts, where the corrected number came from
+  // why: verdict, join map, plain-English explanation, the auditor's counts, where the corrected number came from
   const whyT = flagged && h ? K.why : Q.why;
+  // the join map: drawn still for layout, then once with its entrance when the why column arrives (after the strike)
+  const mapBox = flagged && window.JoinMap ? el("div", "jmbox") : null;
+  let schema = null, mapPlayed = !anim, mapW = 0;
+  const drawMap = (play) => {
+    if (!mapBox || !col.contains(mapBox)) return;
+    const w = mapBox.clientWidth || why.clientWidth;
+    if (!w || (!play && w === mapW && mapBox.firstChild)) return;
+    mapW = w;
+    JoinMap.render(mapBox, schema, { ...c, sql: c.sql || "" }, { mode: "wide", neighbours: false, width: w, animate: !!play });
+  };
   if (flagged) {
     if (h) why.append(el("p", "vword", "Double counting"));
+    if (mapBox) why.append(mapBox);
     if (c.explanation) why.append(el("p", "expl", c.explanation));
     if ((c.findings || []).length) why.append(evidence(c.findings));
     const cor = c.corrected;
@@ -770,13 +1108,44 @@ function showCheck(m, animate) {
   const corHead = flagged && h && cor && cor.sql
     ? (cor.source === "hand" ? "Corrected SQL (hand-written)" : "Corrected SQL (auditor rewrite)") : null;
   let hlOn = false, corOn = false, view = null, corNodes = [];
+  // after the strike the highlighted query gives way to the diff: as written against the corrected SQL
+  const diffable = !!(flagged && h && cor && cor.sql && window.SqlDiff);
+  let diffOn = false, diffPlayed = !anim;
   if (spans.length) at(K.hl, () => { hlOn = true; if (view) view.hl.classList.add("on"); });
   at(K.why, () => { corOn = true; corNodes.forEach((x) => x.classList.add("on")); });
+  let fitReady = false;
+  if (diffable) at(K.why, () => { diffOn = true; if (fitReady) fit(); });
+  if (mapBox) {
+    at(whyT, () => { if (!mapPlayed) { mapPlayed = true; mapW = 0; drawMap(true); } });
+    ckSchema(db).then((x) => { schema = x; mapW = 0; if (fitReady) fit(); });
+  }
 
   // Lay out the query and the why column for the space there is. Runs again once Poppins has loaded.
+  const fitDiff = () => { // largest type at which both columns fit whole
+    let ctl = null;
+    for (const f of [0.9, 0.82, 0.75, 0.68, 0.62, 0.56]) {
+      left.style.setProperty("--sdfs", f + "rem");
+      ctl = SqlDiff.render(left, sql, cor.sql, { copy: false, animate: false });
+      if (left.scrollHeight <= left.clientHeight + 1) break;
+    }
+    if (!diffPlayed) { // first showing: fade in, then removals strike and additions slide in
+      diffPlayed = true;
+      ctl = SqlDiff.render(left, sql, cor.sql, { copy: false, animate: true });
+      ctl.root.classList.add("enter");
+    }
+  };
+  const fitWhy = () => { // why column: step the type down until it fits (long explanations list several tables)
+    why.className = "why";
+    if (mapBox) drawMap(false);
+    for (const lvl of fan || mapBox ? ["t1", "t2", "t3", "t4", "t5"] : ["t1", "t2", "t3"]) { // cumulative; t4 drops the table, t5 the verdict word
+      if (why.scrollHeight <= why.clientHeight + 1) break;
+      why.classList.add(lvl);
+    }
+  };
   const fit = () => {
     if (!col.contains(left)) return;
     if (fan) fan.size();
+    if (diffOn) { fitDiff(); fitWhy(); return; }
     const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
     // Largest type first; at each size, fewer context lines then fewer lines, keeping every highlighted
     // line (and at least 4). Only at the smallest size does it drop lines below that. Nothing is clipped.
@@ -805,7 +1174,7 @@ function showCheck(m, animate) {
     if (hlOn) view.hl.classList.add("on");
     // the corrected query, when the original fits whole and there is room for a few lines of it
     corNodes = [];
-    if (corHead && !view.range) {
+    if (corHead && !view.range && !diffable) {
       const head = el("p", "corhead ph", corHead);
       for (let m2 = 40; m2 >= 3; m2--) {
         const v2 = codeView(cor.sql, [], m2);
@@ -817,14 +1186,10 @@ function showCheck(m, animate) {
       if (!corNodes.length) left.replaceChildren(view.box, key);
       if (corOn) corNodes.forEach((x) => x.classList.add("on"));
     }
-    // why column: step the type down until it fits (long explanations list several tables)
-    why.className = "why";
-    for (const lvl of fan ? ["t1", "t2", "t3", "t4"] : ["t1", "t2", "t3"]) { // cumulative; t4 (grid shown) drops the table
-      if (why.scrollHeight <= why.clientHeight + 1) break;
-      why.classList.add(lvl);
-    }
+    fitWhy();
   };
   checkFit = fit;
+  fitReady = true;
   fit();
   if (window.ResizeObserver) { // the space for the query changes with the window and with font loading
     let lastH = left.clientHeight;
@@ -874,6 +1239,7 @@ function renderCov() {
   $("thrband").textContent = b.name;
   $("thrband").style.color = bandInk(b.key);
   $("cvcarriage").style.transform = `translateX(${(t * 100).toFixed(2)}%)`;
+  lightTicks($("cvticks"), t);
   const row = (lab, big, det, cls) => {
     const d = el("div", "lrow" + (cls ? " " + cls : ""));
     d.append(el("span", "lab", lab), el("span", "big", big), el("span", "det", det));
@@ -897,10 +1263,15 @@ function sv(tag, attrs, text) {
 }
 let curvePts = [];
 let curveX = null;
+let curveKey = ""; // src + size of the drawn static layer; the slider only moves the point while it holds
+let curveDot = null; // { place(t) }
 
 function drawCurve(rows, t) {
   const svg = $("curve");
   const W = svg.clientWidth, H = svg.clientHeight;
+  const key = `${covSrc}|${W}x${H}|${rows.length}`;
+  if (key === curveKey && curveDot && svg.childElementCount) { curveDot.place(t); return; }
+  curveKey = key;
   svg.replaceChildren();
   if (!W || !H || !rows.length) return;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -948,26 +1319,48 @@ function drawCurve(rows, t) {
     svg.append(sv("text", { x: x + (right ? -0.4 : 0.4) * fs, y: m.t - dy * fs + 0.75 * fs, "text-anchor": right ? "end" : "start", "font-size": small }, lab));
   });
 
-  if (pts.length) svg.append(sv("path", { class: "line", d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.c).toFixed(1)},${Y(p.a).toFixed(1)}`).join("") }));
-
-  // the slider's threshold
-  let kt = 0, rt = 0;
-  for (const r of rows) if (r.s >= t) { kt++; rt += r.y; }
-  if (kt) {
-    const x = X(kt / n), y = Y(rt / kt);
-    svg.append(sv("line", { class: "cur", x1: x, x2: x, y1: y, y2: H - m.b }));
-    svg.append(sv("circle", { class: "dot", cx: x, cy: y, r: 0.42 * fs }));
+  if (pts.length) { // the curve draws in from the left the first time this benchmark is shown
+    const path = sv("path", { class: "line", d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.c).toFixed(1)},${Y(p.a).toFixed(1)}`).join("") });
+    svg.append(path);
+    if (!reduced()) {
+      const len = path.getTotalLength();
+      path.setAttribute("stroke-dasharray", `${len}`);
+      path.setAttribute("stroke-dashoffset", `${len}`);
+      path.getBoundingClientRect();
+      path.classList.add("draw");
+      path.style.strokeDashoffset = "0";
+    }
   }
+
+  // the slider's threshold: one point and its drop line, moved in place as the slider moves
+  const cur = sv("line", { class: "cur" }), dot = sv("circle", { class: "dot", r: 0.42 * fs });
+  svg.append(cur, dot);
+  curveDot = {
+    place: (thr) => {
+      let kt = 0, rt = 0;
+      for (const r of rows) if (r.s >= thr) { kt++; rt += r.y; }
+      const show = kt > 0;
+      cur.style.display = dot.style.display = show ? "" : "none";
+      if (!show) return;
+      const x = X(kt / n), y = Y(rt / kt);
+      cur.setAttribute("x1", x); cur.setAttribute("x2", x); cur.setAttribute("y1", y); cur.setAttribute("y2", H - m.b);
+      dot.setAttribute("cx", x); dot.setAttribute("cy", y);
+    },
+  };
+  curveDot.place(t);
 }
 
-function curvePick(ev) {
+let glideStop = () => {};
+function curvePick(ev) { // a tap on the curve: the slider glides to that point, the ledger follows
   if (!curveX || !curvePts.length) return;
   const r = $("curve").getBoundingClientRect();
   const c = curveX(ev.clientX - r.left);
   let best = curvePts[0];
   for (const p of curvePts) if (Math.abs(p.c - c) < Math.abs(best.c - c)) best = p;
-  $("thr").value = (Math.floor(best.s * 100) / 100).toFixed(2);
-  renderCov();
+  const to = Math.floor(best.s * 100) / 100, from = Number($("thr").value);
+  glideStop();
+  if (ev.type === "pointermove") { $("thr").value = to.toFixed(2); renderCov(); return; } // dragging follows the pointer directly
+  glideStop = tween(from, to, 320, (x, u) => { $("thr").value = (u === 1 ? to : x).toFixed(2); renderCov(); });
 }
 
 /* ---------- queue footer ---------- */
@@ -1008,6 +1401,7 @@ function onMessage(ev) {
     setQueue(null, m.queue);
     if (!playing) {
       stopClock();
+      if (pipe && pipe.active) { pipeSettle(pipe.active, (performance.now() - pipe.startedAt) / 1000); pipe.active = null; }
       setGauge(null);
       renderQuestion(m.job.db_id, m.job.question).append(el("p", "err", m.message));
       $("status").textContent = "The worker failed on this question.";
@@ -1046,38 +1440,6 @@ function setInside(on) {
   document.body.classList.toggle("ins", on);
   $("insbtn").setAttribute("aria-pressed", String(on));
   if (on) { panelOff(); setCheck(false); setCov(false); setHow(false); }
-}
-
-function setInsGauge(score, mode) {
-  const band = $("insband");
-  band.style.color = "";
-  band.className = "";
-  const car = $("inscarriage");
-  $("insvalue").classList.toggle("blank", mode === "hold" || score == null);
-  if (mode === "hold") {
-    car.classList.add("snap"); car.style.transform = "translateX(0)"; void car.offsetWidth; car.classList.remove("snap");
-    $("insvalue").textContent = "--";
-    band.textContent = "Awaiting probe";
-    band.className = "awaiting";
-    $("instape").classList.remove("scored");
-    $("insneedle").className = "needle hold";
-    return;
-  }
-  if (score == null) {
-    $("insvalue").textContent = "--";
-    band.textContent = mode === "noprobe" ? "No probe" : "No reading";
-    $("instape").classList.remove("scored");
-    $("insneedle").className = "needle";
-    return;
-  }
-  const s = Math.min(1, Math.max(0, score));
-  const b = bandOf(s);
-  $("insvalue").textContent = s.toFixed(2);
-  band.textContent = b.name;
-  band.style.color = bandInk(b.key);
-  $("instape").classList.add("scored");
-  $("insneedle").className = "needle on";
-  car.style.transform = `translateX(${(s * 100).toFixed(2)}%)`;
 }
 
 function layerCell(x, i, usedLayer, dense) {
@@ -1125,7 +1487,7 @@ function layerCell(x, i, usedLayer, dense) {
 }
 
 function renderInside(r, mode) { // mode: idle | working | animate | still
-  insTimers.forEach(clearTimeout); insTimers = [];
+  insTimers.forEach((t) => (t.cancel ? t.cancel() : clearTimeout(t))); insTimers = [];
   const strip = $("strip");
   const note = $("insnote");
   strip.replaceChildren();
@@ -1164,23 +1526,64 @@ function renderInside(r, mode) { // mode: idle | working | animate | still
   grid.append(lab, ...cells);
   strip.append(grid, el("p", "cap", `Each layer: its own probe. Needle uses layer ${usedLayer != null ? usedLayer : "[TBD]"} + other signals.`));
   const anim = mode === "animate" && !reduced();
-  const fin = () => setInsGauge(nd, "noprobe");
-  if (anim) {
-    setInsGauge(null, "hold");
-    requestAnimationFrame(() => requestAnimationFrame(() => cells.forEach((c) => c.classList.add("on"))));
-    insTimers.push(setTimeout(fin, cells.length * INS_STEP + 700));
-  } else {
-    cells.forEach((c) => c.classList.add("on"));
-    fin();
+  const fin = (animate) => setInsGauge(nd, "noprobe", animate);
+  if (!anim) {
+    cells.forEach((c) => c.classList.add("on", "still", "hit"));
+    fin(false);
+    return;
   }
+  // the scan: cells fill left to right, each number counting up to its real p; the used layer is outlined when reached
+  setInsGauge(null, "hold");
+  const step = Math.min(INS_STEP, 1500 / cells.length), FILL = 420, pop = 320;
+  const parts = cells.map((c, i) => ({
+    c, i, p: Number(layers[i].p), fill: c.querySelector(".fill"), abar: c.querySelector(".abar2"), pv: c.querySelector(".pv"),
+    labelled: c.querySelector(".pv").textContent !== "", used: c.classList.contains("used"),
+  }));
+  const end = (cells.length - 1) * step + FILL;
+  let raf = 0;
+  const t0 = performance.now() + 60;
+  const frame = (now) => {
+    const t = now - t0;
+    for (const q of parts) {
+      const a = Math.min(1, Math.max(0, (t - q.i * step) / pop));
+      if (a > 0 && !q.c.classList.contains("on")) q.c.classList.add("on");
+      q.c.style.opacity = a.toFixed(3);
+      q.c.style.transform = a < 1 ? `translateY(${(10 * (1 - easeOut(a))).toFixed(1)}px)` : "";
+      const f = easeOut(Math.min(1, Math.max(0, (t - q.i * step - 60) / FILL)));
+      if (q.fill) q.fill.style.transform = `scaleY(${f.toFixed(4)})`;
+      if (q.abar) q.abar.style.transform = `scaleY(${f.toFixed(4)})`;
+      if (q.labelled && Number.isFinite(q.p)) q.pv.textContent = (q.p * f).toFixed(2);
+      if (q.used && f >= 1 && !q.c.classList.contains("hit")) q.c.classList.add("hit");
+    }
+    if (t < end) raf = requestAnimationFrame(frame);
+    else { parts.forEach((q) => { q.c.style.transform = ""; q.c.style.opacity = ""; q.c.classList.add("on"); }); fin(true); }
+  };
+  raf = requestAnimationFrame(frame);
+  insTimers.push({ cancel: () => cancelAnimationFrame(raf) });
 }
 
 /* ---------- How toggle ---------- */
 function setHow(on) {
+  const was = document.body.classList.contains("how");
   document.body.classList.toggle("how", on);
   $("howbtn").setAttribute("aria-pressed", String(on));
   if (on) setInside(false);
+  if (on && !was && lastShown && lastShown.explain) renderHow(lastShown.explain, lastShown, true); // opening How replays the cascade
 }
+
+/* ---------- view order and the shared-axis direction; hidden gauges catch up when their view shows ---------- */
+const VIEW_ORDER = ["live", "check", "how", "ins", "cov", "sb", "fail"];
+const viewNow = () => VIEW_ORDER.find((v) => v !== "live" && document.body.classList.contains(v)) || "live";
+let viewPrev = "live";
+new MutationObserver(() => {
+  const v = viewNow();
+  if (v === viewPrev) return;
+  document.body.style.setProperty("--enter", VIEW_ORDER.indexOf(v) > VIEW_ORDER.indexOf(viewPrev) ? "enter-fwd" : "enter-back");
+  viewPrev = v;
+  if (v === "live") G.main.sync();
+  if (v === "ins") G.ins.sync();
+  if (v === "cov" && covOn) renderCov();
+}).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 function toggleHow() {
   if (checkMode || covOn || insOn || panelOpen()) { panelOff(); setCheck(false); setCov(false); setInside(false); setHow(true); return; }
   setHow(!document.body.classList.contains("how"));
@@ -1194,6 +1597,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "h") toggleHow();
   else if (e.key === "i") setInside(!insOn);
   else if (e.key === "c") setCov(!covOn);
+  else if (e.key === "b") window.open("board.html", "altimeter-board");
 });
 $("thr").addEventListener("input", renderCov);
 for (const b of document.querySelectorAll(".seg button")) b.addEventListener("click", () => { covSrc = b.dataset.src; renderCov(); });
@@ -1204,6 +1608,45 @@ addEventListener("resize", () => {
   clearTimeout(resizeT);
   resizeT = setTimeout(() => { renderCov(); if (checkMode && checkFit) checkFit(); }, 150);
 });
+
+/* ---------- clouds behind the live view: the layer's height follows the needle ----------
+   Ask means flying in cloud (the layer rises over the lower panel); Cruise is above it (the layer sinks away);
+   no reading leaves a thin low layer. Flat silhouettes in panel greys, a slow drift, nothing else. */
+function cloudPath(seed, W, H, base, rMin, rMax) { // a bank of arcs along a baseline, closed to the bottom; deterministic
+  let s = seed;
+  const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
+  let x = -rMax, d = `M${-rMax},${H} L${-rMax},${base}`;
+  while (x < W + rMax) {
+    const r = rMin + rnd() * (rMax - rMin);
+    const cx = x + r * (0.55 + rnd() * 0.35);
+    d += ` A${r},${r * (0.85 + rnd() * 0.15)} 0 0 1 ${(cx + r).toFixed(1)},${base}`;
+    x = cx + r * 0.55;
+  }
+  return d + ` L${x + rMax},${H} Z`;
+}
+function buildClouds() {
+  const host = $("clouds");
+  if (!host) return;
+  const W = 1200, H = 360;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "xMidYMax slice", "aria-hidden": "true" });
+  const sky = sv("g", { class: "sky" });
+  // back bank tops the box (first to show as the layer rises), the nearer banks sit lower and denser
+  [[11, 100, 115, 150, "l1"], [29, 230, 75, 120, "l2"], [47, 330, 50, 90, "l3"]].forEach(([seed, base, r0, r1, cls]) => {
+    const band = sv("g", { class: "band " + cls });
+    const d = cloudPath(seed, W, H, base, r0, r1);
+    band.append(sv("path", { d }), sv("path", { d, transform: `translate(${W} 0)` })); // two copies: a seamless drift loop
+    sky.append(band);
+  });
+  svg.append(sky);
+  host.append(svg);
+}
+const cloudLevel = (s) => (s == null ? 0.2 : 0.16 + 0.84 * Math.pow(1 - Math.min(1, Math.max(0, s)), 1.4));
+function cloudSet(level) { // level 1: the layer fills its box; 0: fully below the panel
+  const host = $("clouds");
+  if (host) host.style.transform = `translateY(${((1 - level) * 100).toFixed(2)}%)`;
+}
+buildClouds();
+cloudSet(cloudLevel(null));
 
 buildTape();
 buildTape("cvticks", "cvbands", "cvnames"); // same geometry as the gauge tape

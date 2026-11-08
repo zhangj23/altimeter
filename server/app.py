@@ -27,6 +27,12 @@ Pre-flight checks are broadcast too, after each successful POST /api/check, with
    "check": <the /api/check response object, unchanged>}
 Check ids come from the same counter as job ids, so they never collide.
 
+Uploads (server/uploads.py; memory only, never logged): POST /api/upload multipart, one .sqlite/.db or 1-8 .csv,
+<=10 MB total, <=200k rows and <=50 columns per table -> {db_id: "upload:<id>", kind, tables: [{name, rows}],
+expires_in_s} or 400 {error}. GET /api/upload/<id> (same shape, 404 when gone), DELETE /api/upload/<id>.
+"upload:<id>" works in /api/schema, /api/check and the /ws ask; such answers carry "calibrated": false and
+"calibration_note". 15 min idle TTL, at most 8 live (oldest evicted). Uploads are not listed in /api/dbs.
+
 Run (inside WSL, repo root):  python -m server.app [--fake] [--port 8000]
 ALTIMETER_JOB_TIMEOUT (seconds, default 45): a job running longer gets an error and the worker restarts.
 """
@@ -38,6 +44,7 @@ import itertools
 import os
 import re
 import secrets
+import sqlite3
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -45,11 +52,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from altimeter.sqlexec import connect_guarded
+
 from .preflight import annotate, check_listeners, router as preflight_router
-from .worker import JobTimeout, WorkerClient, list_dbs
+from .uploads import CALIBRATION_NOTE, MAX_BYTES, PREFIX, STORE, UploadError, is_upload, parse_multipart
+from .worker import JobTimeout, WorkerClient, db_path, known_db, list_dbs
 
 STATIC = Path(__file__).parent / "static"
 MAX_QUESTION_CHARS = 500
@@ -231,10 +241,20 @@ class Gateway:
             staged.append(asyncio.run_coroutine_threadsafe(self.stage(job, stage), loop))
 
         try:
-            res = await asyncio.to_thread(self.worker.ask, job.db_id, job.question, on_stage)
+            upload, pid = None, self.worker.proc.pid
+            if is_upload(job.db_id):  # the worker is another process: ship it the tables once per worker
+                upload = await asyncio.to_thread(STORE.export, job.db_id, pid)
+                if upload is None:
+                    raise RuntimeError("This upload expired; upload the file again.")
+            res = await asyncio.to_thread(self.worker.ask, job.db_id, job.question, on_stage, None, upload,
+                                          STORE.ids())
+            if upload is not None and not res.get("error"):
+                STORE.mark_sent(job.db_id, pid)
             for f in staged:  # every stage message goes out before the result
                 await asyncio.wrap_future(f)
             res = await asyncio.to_thread(annotate, res)  # pre-flight fan-out audit of the model's SQL
+            if upload is not None:  # the needle was calibrated on BIRD dev only
+                res["calibrated"], res["calibration_note"] = False, CALIBRATION_NOTE
             self.current = None
             await self.send(job, {"type": "result", **res})
             await self.broadcast(job, {"type": "result", **res})
@@ -278,12 +298,20 @@ async def _on_check(out: dict[str, Any], preset: dict[str, Any] | None) -> None:
     await gw.send_tables({"type": "check", "job": job, "check": out})
 
 
+async def _sweep_uploads() -> None:
+    while True:  # idle uploads expire even when nobody touches the store
+        await asyncio.sleep(30)
+        STORE.sweep()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     gw.worker = WorkerClient()
     check_listeners.append(_on_check)
     task = asyncio.create_task(gw.consume())
+    sweeper = asyncio.create_task(_sweep_uploads())
     yield
+    sweeper.cancel()
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
@@ -312,6 +340,97 @@ def dbs() -> dict[str, Any]:
     return {"dbs": list_dbs(), "fake": bool(gw.worker and gw.worker.fake)}
 
 
+_schemas: dict[str, dict[str, Any]] = {}
+COUNT_TIMEOUT_S = 2.0
+
+
+def _read_schema(db_id: str) -> dict[str, Any]:
+    con = connect_guarded(db_path(db_id))
+    try:
+        names = [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY rowid")]
+        info = {t: con.execute(f'PRAGMA table_info("{t.replace(chr(34), chr(34) * 2)}")').fetchall() for t in names}
+        tables = []
+        for t in names:
+            q = t.replace('"', '""')
+            fks: dict[str, str] = {}
+            for fk in con.execute(f'PRAGMA foreign_key_list("{q}")').fetchall():
+                ref, frm, to = fk[2], fk[3], fk[4]
+                if to is None:  # references the parent's primary key
+                    to = next((c[1] for c in info.get(ref, []) if c[5]), None)
+                fks.setdefault(frm, f"{ref}.{to}" if to else ref)
+            deadline = time.time() + COUNT_TIMEOUT_S
+            con.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10_000)
+            try:
+                rows: int | None = con.execute(f'SELECT COUNT(*) FROM "{q}"').fetchone()[0]
+            except sqlite3.Error:
+                rows = None  # slow table: skip the count
+            con.set_progress_handler(None, 0)
+            cols = [{"name": c[1], "type": c[2] or "", "pk": bool(c[5]), "fk": fks.get(c[1])} for c in info[t]]
+            tables.append({"name": t, "rows": rows, "columns": cols})
+        return {"db_id": db_id, "tables": tables}
+    finally:
+        con.close()
+
+
+@app.get("/api/schema")
+def schema(db_id: str = "") -> Any:
+    if is_upload(db_id):  # never cached: it can expire
+        if not STORE.touch(db_id):
+            return JSONResponse({"error": f"unknown or expired upload: {db_id}"}, status_code=404)
+        return {**_read_schema(db_id), "calibrated": False, "calibration_note": CALIBRATION_NOTE}
+    if db_id not in list_dbs():
+        return JSONResponse({"error": f"unknown database: {db_id}"}, status_code=404)
+    if db_id not in _schemas:
+        _schemas[db_id] = _read_schema(db_id)
+    return _schemas[db_id]
+
+
+UPLOAD_BODY_LIMIT = MAX_BYTES + 256 * 1024  # files + multipart framing
+
+
+@app.post("/api/upload")
+async def upload(request: Request) -> Any:
+    """Multipart: one .sqlite/.db file, or 1-8 .csv files. -> same shape as GET /api/upload/<id>. 400 + {error}."""
+    body, seen = bytearray(), 0
+    async for chunk in request.stream():  # an oversize body is read and discarded (not stored), so the client
+        seen += len(chunk)                # gets the 400 instead of a reset connection; give up past 64 MB
+        if seen <= UPLOAD_BODY_LIMIT:
+            body += chunk
+        elif seen > 64 * 1024 * 1024:
+            break
+    if seen > UPLOAD_BODY_LIMIT:
+        return JSONResponse({"error": f"upload is over the {MAX_BYTES // (1024 * 1024)} MB limit"}, status_code=400)
+    try:
+        files = parse_multipart(request.headers.get("content-type", ""), bytes(body))
+        del body
+        db_id = await asyncio.to_thread(STORE.add, files)
+    except UploadError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except (sqlite3.Error, MemoryError) as e:
+        return JSONResponse({"error": f"could not load the upload ({type(e).__name__}: {e})"}, status_code=400)
+    info = await asyncio.to_thread(STORE.info, db_id)
+    log(f"upload stored: {len(info['tables']) if info else 0} tables")  # never the name, id or contents
+    return info
+
+
+def _upload_db_id(uid: str) -> str:
+    return uid if is_upload(uid) else PREFIX + uid
+
+
+@app.get("/api/upload/{uid}")
+def upload_info(uid: str) -> Any:
+    info = STORE.info(_upload_db_id(uid))
+    if info is None:
+        return JSONResponse({"error": "unknown or expired upload"}, status_code=404)
+    return info
+
+
+@app.delete("/api/upload/{uid}")
+def upload_delete(uid: str) -> dict[str, Any]:
+    return {"deleted": STORE.remove(_upload_db_id(uid))}
+
+
 @app.get("/api/status")
 def status() -> dict[str, Any]:
     return gw.status()
@@ -320,7 +439,6 @@ def status() -> dict[str, Any]:
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    known = set(list_dbs())
     client: Client | None = None
     try:
         while True:
@@ -336,7 +454,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if client is None:  # a page from before hello existed: anonymous client for this socket
                 client = gw.attach("", ws)
             db_id, question = str(msg.get("db_id", "")), str(msg.get("question", "")).strip()
-            if db_id not in known:
+            if not known_db(db_id):
                 await ws.send_json({"type": "error", "message": f"unknown database: {db_id}"})
                 continue
             if not question or len(question) > MAX_QUESTION_CHARS:
