@@ -10,7 +10,8 @@ const BANDS = [ // same edges as app.js
 const SHOW_ROWS = 5;
 const POSITION = { last_prompt: "last prompt token", last_gen: "last generated token", mean_gen: "mean over generated SQL tokens" };
 // Replay schedule, ms after the result is shown. The needle sweeps at T.swing; the whole replay is done by T.done.
-const T = { z: 150, p: 600, ref: 950, group0: 1200, groupGap: 280, total: 2250, swing: 2400, done: 3600 };
+// The last group lands at ~1.95 s; the needle swings as it lands and settles (spring) by ~2.6 s.
+const T = { z: 100, p: 400, ref: 650, group0: 850, groupGap: 220, total: 1700, swing: 1850, done: 2900 };
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -22,6 +23,17 @@ const el = (tag, cls, text) => {
 const fx = (v, d) => (v == null || !Number.isFinite(Number(v)) ? "[TBD]" : Number(v).toFixed(d));
 const sx = (v, d) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d);
 const minus = (s) => s.replace(/^-/, "−");
+// Rounds each addend to d decimals so the shown addends add up to the shown total (largest remainder): every
+// value stays within one unit of its last digit of the worker's number, and the sum on screen checks out.
+// The first addend (a fixed baseline or intercept) is never adjusted, so it reads the same on every answer.
+function sumRound(vals, d, total) {
+  const f = 10 ** d;
+  const r = vals.map((v) => Math.round(v * f));
+  let diff = Math.round(total * f) - r.reduce((a, b) => a + b, 0);
+  const order = vals.map((v, i) => ({ i, e: v * f - r[i] })).slice(1).sort((a, b) => (diff > 0 ? b.e - a.e : a.e - b.e));
+  for (let k = 0; diff !== 0 && k < order.length; k++) { const u = Math.sign(diff); r[order[k].i] += u; diff -= u; }
+  return r.map((x) => x / f);
+}
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let timers = [];
@@ -184,14 +196,18 @@ function resultTable(columns, rows) {
 
 function renderQuestion(db_id, question) {
   const a = $("answer");
-  a.replaceChildren(el("h2", null, question), el("p", "route", `${dbName(db_id)} · local`));
+  a.replaceChildren(el("h2", String(question || "").length > 110 ? "long" : null, question), el("p", "route", `${dbName(db_id)} · local`));
   return a;
 }
 
 function renderAnswer(r) {
   const a = renderQuestion(r.db_id, r.question);
   a.querySelector(".route").textContent = `${dbName(r.db_id)}${r.fake ? " · fake worker" : ""} · ${fx(r.gen_seconds, 1)} s`;
-  a.append(el("pre", "sql", r.sql || "(no SQL generated)"));
+  const pre = el("pre", "sql", r.sql || "(no SQL generated)");
+  a.append(pre);
+  requestAnimationFrame(() => { // a long query is cut at the box; say so rather than end mid-line silently
+    if (pre.isConnected && pre.scrollHeight > pre.clientHeight + 2) pre.after(el("p", "count", "SQL cut to fit here; the asking phone shows all of it."));
+  });
   if (r.error) a.append(el("p", "err", r.timed_out ? `Timed out: ${r.error}` : r.error));
   else if (r.rows) {
     if (r.rows.length) a.append(resultTable(r.columns, r.rows));
@@ -250,13 +266,14 @@ function waterfall(ex) {
     wf.append(r);
     return track;
   };
-  const ref = row("Baseline", "", minus(ex.stack_ref.toFixed(2)), T.ref);
+  const shown = sumRound([ex.stack_ref, ...ex.groups.map((g) => g.value)], 2, ex.logit); // addends as printed
+  const ref = row("Baseline", "", minus(shown[0].toFixed(2)), T.ref);
   const m = el("i", "mark ref");
   m.style.left = pct(ex.stack_ref) + "%";
   ref.append(m);
   ex.groups.forEach((g, k) => {
     const t = T.group0 + k * T.groupGap;
-    const track = row(g.name, "", sx(g.value, 2), t);
+    const track = row(g.name, "", sx(shown[k + 1], 2), t);
     const a = cum[k], b = cum[k + 1];
     const bar = el("i", "bar " + (g.value >= 0 ? "up" : "down"));
     bar.style.left = pct(Math.min(a, b)) + "%";
@@ -265,7 +282,7 @@ function waterfall(ex) {
     track.append(bar);
   });
   // the running sum: shown from the baseline on, its value and mark move as each group lands
-  const tot = row("Needle logit", "", minus(ex.stack_ref.toFixed(2)), T.ref + 120);
+  const tot = row("Needle logit", "", minus(shown[0].toFixed(2)), T.ref + 120);
   const carrier = el("i", "markw");
   carrier.style.transform = `translateX(${pct(ex.stack_ref)}%)`;
   carrier.append(el("i", "mark"));
@@ -303,7 +320,7 @@ function waterfall(ex) {
   key.append(el("span", "k-up", "raises"), el("span", "k-down", "lowers"), el("span", "k-zero", "needle 0.50"));
   wrap.append(key);
   const total = el("p", "step wf-total",
-    `${minus(ex.stack_ref.toFixed(2))} ${ex.groups.map((g) => sx(g.value, 2).replace(/^([+−])/, "$1 ")).join(" ")} = ${minus(ex.logit.toFixed(2))} → needle ${ex.needle.toFixed(2)}`);
+    `${minus(shown[0].toFixed(2))} ${shown.slice(1).map((v) => sx(v, 2).replace(/^([+−])/, "$1 ")).join(" ")} = ${minus(ex.logit.toFixed(2))} → needle ${ex.needle.toFixed(2)}`);
   total.dataset.t = T.swing;
   wrap.append(total);
   wrap.odometer = wf.odometer;
@@ -322,13 +339,21 @@ function runOdometer(fn, from, to) { // drives fn(t) over replay time [from, to]
   odoStop = () => cancelAnimationFrame(raf);
 }
 
+// Out-of-fold track record of the two outer bands; the line for this answer's band is in full ink.
 function recordBlock(ex, r) {
   const ul = el("ul", "record");
   const tr = ex.track_record || {};
-  const rate = tr.ask_band_wrong_rate;
-  const n = tr.n;
-  const nTxt = n == null ? "[TBD]" : Number(n).toLocaleString("en-US");
-  ul.append(el("li", null, `Ask band answers were wrong ${rate == null ? "[TBD]" : Math.round(rate * 100) + "%"} of the time on ${nTxt} held-out questions.`));
+  const nd = needleOf(r);
+  const mine = nd == null || r.calibrated === false ? null : bandOf(Math.min(1, Math.max(0, nd))).key;
+  const src = String(tr.source || ""); // which benchmark the rates pool, as the worker states it
+  const pop = /bird/i.test(src) && /spider/i.test(src) ? "Spider + BIRD " : /bird/i.test(src) ? "BIRD " : /spider/i.test(src) ? "Spider " : "";
+  const line = (key, name, rate, n) => {
+    const nTxt = n == null ? "[TBD]" : Number(n).toLocaleString("en-US");
+    const li = el("li", key === mine ? "mine" : null, `${name} band answers were wrong ${rate == null ? "[TBD]" : Math.round(rate * 100) + "%"} of the time on ${nTxt} held-out ${pop}questions.`);
+    ul.append(li);
+  };
+  line("ask", "Ask", tr.ask_band_wrong_rate, tr.n);
+  if (tr.cruise_band_wrong_rate != null) line("cruise", "Cruise", tr.cruise_band_wrong_rate, tr.cruise_n);
   return ul;
 }
 
@@ -374,6 +399,8 @@ function stackTable(ex) { // one row per learned weight: logit = intercept + Σ 
   th.append(hr);
   const tb = el("tbody");
   const maxAbs = Math.max(1e-9, Math.abs(b0), ...terms.map((x) => Math.abs(x.contribution)));
+  const exact = b0 + terms.reduce((a, x) => a + x.contribution, 0);
+  const shown = sumRound([b0, ...terms.map((x) => x.contribution)], 3, exact); // the printed column adds up to the printed logit
   const cbar = (c, cls) => {
     const trk = el("span", "ctrk" + (cls ? " " + cls : ""));
     const bar = el("i", "cbar " + (c >= 0 ? "up" : "down"));
@@ -389,7 +416,7 @@ function stackTable(ex) { // one row per learned weight: logit = intercept + Σ 
   ref.style.setProperty("--i", 0);
   ref.append(el("td", "lab", "Intercept"));
   if (hasW) ref.append(el("td", "n", ""));
-  ref.append(el("td", "n", sx(b0, 3)), cbar(b0));
+  ref.append(el("td", "n", sx(shown[0], 3)), cbar(b0));
   tb.append(ref);
   let sum = b0;
   const landed = [b0]; // running sum after each row, for the odometer
@@ -398,7 +425,7 @@ function stackTable(ex) { // one row per learned weight: logit = intercept + Σ 
     tr.style.setProperty("--i", i + 1);
     tr.append(el("td", "lab", (INPUT_WORDS[x.name] || (() => x.name))(ex)));
     if (hasW) tr.append(el("td", "n", sx(x.weight, 3)));
-    tr.append(el("td", "n", sx(x.contribution, 3)), cbar(x.contribution));
+    tr.append(el("td", "n", sx(shown[i + 1], 3)), cbar(x.contribution));
     tb.append(tr);
     sum += x.contribution;
     landed.push(sum);
@@ -471,7 +498,7 @@ function renderHow(ex, r, animate) {
     `logit ${minus(st.sum.toFixed(3))} → needle ${ex.needle.toFixed(2)}${Math.abs(st.sum - ex.logit) > 1e-6 ? " (worker reports logit " + minus(ex.logit.toFixed(3)) + ")" : ""}`);
   s2.append(el("h3", null, `The needle: logistic regression over ${st.n} inputs`), st.table, fig);
   L.append(s2);
-  L.append(el("p", "fact", "Both stages are logistic regression: every prediction is an exact sum of weight × input. Chosen for that auditability; not compared against nonlinear models."));
+  L.append(el("p", "fact", "Both stages are logistic regression: every prediction is an exact sum of weight × input. A neural network and gradient boosting did no better on the same splits."));
 
   // right: the probe's weights over one layer, then the layer stack
   const pt = ex.probe_terms || {};
@@ -497,8 +524,9 @@ function renderHow(ex, r, animate) {
   const topSum = dims.reduce((s, d) => s + d.c, 0);
   const rest = pt.rest != null ? pt.rest : ex.rest;
   const nRest = pt.n_rest != null ? pt.n_rest : ex.d - dims.length;
+  const zs = sumRound([ex.b0, topSum, rest], 3, ex.z);
   b1.append(el("p", "dsum",
-    `b0 ${minus(ex.b0.toFixed(3))}  ${sx(topSum, 3)} (these ${dims.length})  ${sx(rest, 3)} (other ${Number(nRest).toLocaleString("en-US")})  = z ${minus(ex.z.toFixed(3))} → probe score ${ex.p_raw.toFixed(2)}`));
+    `b0 ${minus(zs[0].toFixed(3))}  ${sx(zs[1], 3)} (these ${dims.length})  ${sx(zs[2], 3)} (other ${Number(nRest).toLocaleString("en-US")})  = z ${minus(ex.z.toFixed(3))} → probe score ${ex.p_raw.toFixed(2)}`));
   R.append(b1);
 
   const nL = ex.n_layers;
@@ -511,7 +539,7 @@ function renderHow(ex, r, animate) {
   for (let Li = 0; Li <= nL; Li++) {
     const c = el("span", Li === ex.layer ? "used" : null);
     if (au.has(Li)) c.style.background = rampColor((au.get(Li) - lo) / (hi - lo));
-    c.title = `${Li === 0 ? "Embeddings (layer 0)" : "Layer " + Li}: ${au.has(Li) ? "AUROC " + au.get(Li).toFixed(3) : "not measured"}${Li === ex.layer ? ", used" : ", not used"}`;
+    c.title = `${Li === 0 ? "Embeddings (layer 0)" : "Layer " + Li}: ${au.has(Li) ? "Spider AUROC " + au.get(Li).toFixed(3) : "not measured"}${Li === ex.layer ? ", used" : ", not used"}`;
     strip.append(c);
   }
   const labels = el("div", "layer-labels");
@@ -519,7 +547,7 @@ function renderHow(ex, r, animate) {
   left.style.left = "0";
   const right = el("span", null, `Layer ${nL}`);
   right.style.right = "0";
-  const used = el("span", "used", `Layer ${ex.layer}, used${au.has(ex.layer) ? " · AUROC " + au.get(ex.layer).toFixed(3) : ""}`);
+  const used = el("span", "used", `Layer ${ex.layer}, used${au.has(ex.layer) ? " · Spider AUROC " + au.get(ex.layer).toFixed(3) : ""}`);
   used.style.left = `${((ex.layer + 0.5) / (nL + 1)) * 100}%`;
   labels.append(left, right, used);
   a.append(strip, labels);
@@ -575,6 +603,8 @@ function play(r, animate) {
   const gm = r.calibrated === false ? "uncal" : "noprobe";
   G.main.note = G.ins.note = r.calibration_note || UNCAL;
   renderInside(r, animate ? "animate" : "still");
+  publishReading(r, nd);
+  if (covOn) renderCov(); // Coverage marks the latest answer
   if (!has || !animate) {
     for (const n of document.querySelectorAll("#excol .step, #excol .bar")) n.classList.add("on");
     odoStop();
@@ -595,6 +625,18 @@ function play(r, animate) {
     playing = false;
     if (deferred) { const d = deferred; deferred = null; play(d, true); }
   });
+}
+
+// The latest live reading, for other scripts on this page (scoreboard.js marks it on Coverage):
+// window.altimeterLast = {needle, band, calibrated, db_id, question, at}; event "altimeter:reading" carries the same.
+let published = null;
+function publishReading(r, nd) {
+  if (nd == null || !r || r === published || (r.explain && r.explain.synthetic)) return; // a replay is not a new reading
+  published = r;
+  const cal = r.calibrated !== false;
+  const detail = { needle: nd, band: cal ? bandOf(Math.min(1, Math.max(0, nd))).key : null, calibrated: cal, db_id: r.db_id, question: r.question, at: Date.now() };
+  window.altimeterLast = detail;
+  try { window.dispatchEvent(new CustomEvent("altimeter:reading", { detail })); } catch { /* a listener's error is its own */ }
 }
 
 /* ---------- pipeline strip: the worker's stages with their measured time ----------
@@ -842,45 +884,57 @@ function fanStrip(fo, f, h) {
   const rl = shortIds(g.rows), cl = shortIds(g.cols);
   const lk = `${L.table}.${L.key}`, rk = `${R.table}.${R.key}`;
   const of = (k, n) => (k === n ? `all ${nfmt(n)}` : `${k} of ${nfmt(n)}`);
-  let cap = `${lk} down · ${rk} across`;
+  // A tall, narrow grid (many counted rows, few repeats each) is drawn transposed so it stays short: the counted
+  // rows run across and each one's copies go down its column.
+  const T = g.rows.length > 6 && g.rows.length > 2 * g.cols.length;
+  let cap = T ? `${rk} down · ${lk} across` : `${lk} down · ${rk} across`;
   if (g.sampled) cap += G ? ` · ${of(g.rows.length, G.left)} × ${of(g.cols.length, G.right)} shown` : ` · ${g.rows.length} × ${g.cols.length} shown`;
   if (g.cells.some((c) => c[2] > 1)) cap += " · a number: joined rows sharing that pair";
 
-  const grid = el("div", "fgrid");
+  const grid = el("div", "fgrid" + (T ? " tr" : ""));
   grid.append(el("span"));
-  for (const v of cl.labels) grid.append(el("span", "h", v));
   const n = new Map(g.cells.map((c) => [c[0] * 100000 + c[1], c[2]]));
-  const cells = []; // in fan order: row by row, each row's first joined row first (the one that stays after the fix)
-  const heads = [];
-  g.rows.forEach((_, r) => {
-    const rh = el("span", "rh", rl.labels[r]);
-    heads.push(rh);
+  const heads = []; // one per counted row: its label lights when its first copy lands
+  const slotAt = new Map(); // r * 100000 + k -> slot
+  const dRows = T ? g.cols : g.rows, dCols = T ? g.rows : g.cols;
+  const dRowL = T ? cl.labels : rl.labels, dColL = T ? rl.labels : cl.labels;
+  dColL.forEach((v, j) => { const h = el("span", "h", v); grid.append(h); if (T) heads[j] = h; });
+  dRows.forEach((_, i) => {
+    const rh = el("span", "rh", dRowL[i]);
+    if (!T) heads[i] = rh;
     grid.append(rh);
+    dCols.forEach((_, j) => {
+      const slot = el("span", "slot");
+      slotAt.set(T ? j * 100000 + i : i * 100000 + j, slot);
+      grid.append(slot);
+    });
+  });
+  const cells = []; // in fan order: counted row by counted row, each one's first joined row first (the one kept after the fix)
+  g.rows.forEach((_, r) => {
     let first = true;
     g.cols.forEach((_, k) => {
-      const slot = el("span", "slot");
       const v = n.get(r * 100000 + k);
-      if (v) {
-        const c = el("i", "c " + (first ? "keep" : "dup"), v > 1 ? String(v) : null);
-        c.dataset.row = r;
-        slot.append(c);
-        cells.push(c);
-        first = false;
-      }
-      grid.append(slot);
+      if (!v) return;
+      const c = el("i", "c " + (first ? "keep" : "dup"), v > 1 ? String(v) : null);
+      c.dataset.row = r;
+      slotAt.get(r * 100000 + k).append(c);
+      cells.push(c);
+      first = false;
     });
   });
   const box = el("div", "fbox");
   const key = el("p", "fkey"); // shown once the copies are back: which cell is counted once, which is a repeat
   key.append(el("span", "k-keep", "counted once after the fix"), el("span", "k-dup", "repeat made by the JOIN"));
   box.append(el("p", "fcap", cap), grid, key);
-  // --dx: how far each copy sits from its row's first cell, so it can fan out from there and collapse back
+  // --dx/--dy: how far each copy sits from its row's first cell, so it can fan out from there and collapse back
   const measure = () => {
-    const firstX = new Map();
+    const first = new Map();
     for (const c of cells) {
-      const x = c.parentNode.offsetLeft;
-      if (!firstX.has(c.dataset.row)) firstX.set(c.dataset.row, x);
-      c.style.setProperty("--dx", `${(firstX.get(c.dataset.row) - x).toFixed(1)}px`);
+      const s0 = c.parentNode, x = s0.offsetLeft, y = s0.offsetTop;
+      if (!first.has(c.dataset.row)) first.set(c.dataset.row, [x, y]);
+      const f = first.get(c.dataset.row);
+      c.style.setProperty("--dx", `${(f[0] - x).toFixed(1)}px`);
+      c.style.setProperty("--dy", `${(f[1] - y).toFixed(1)}px`);
     }
   };
 
@@ -906,12 +960,12 @@ function fanStrip(fo, f, h) {
   const size = () => { // cell size from the space there is; header labels always fit
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
     const W = $("checkcol").clientWidth, H = $("checkcol").clientHeight;
-    const C = g.cols.length, Rn = g.rows.length;
+    const C = dCols.length, Rn = dRows.length;
     const lab = Math.max(0, ...[...grid.querySelectorAll(".h")].map((x) => x.scrollWidth)) + 6;
     const rh = Math.max(0, ...[...grid.querySelectorAll(".rh")].map((x) => x.scrollWidth)) + 0.5 * rem;
     const cw = Math.max(lab, Math.min(4.6 * rem, (W - 19 * rem - 2.6 * rem - rh - 2 * C) / C));
     const cap = box.firstChild.offsetHeight;
-    const ch = Math.max(0.55 * rem, Math.min(2.6 * rem, (0.26 * H - cap - 1.2 * rem) / (Rn + 1) - 2));
+    const ch = Math.max(0.55 * rem, Math.min((T ? 1.6 : 2.6) * rem, (0.26 * H - cap - 1.2 * rem) / (Rn + 1) - 2));
     grid.style.gridTemplateColumns = `auto repeat(${C}, ${cw.toFixed(1)}px)`;
     grid.style.setProperty("--ch", `${ch.toFixed(1)}px`);
     measure();
@@ -974,15 +1028,15 @@ function showCheck(m, animate) {
   // corrected number counts down from it; the copies return (kept rows green, repeats amber); the strike; the ratio; the why.
   const fo = flagged ? (c.findings || []).map((f) => f.fanout).find((x) => x && x.grid && x.grid.cells && x.grid.cells.length) : null;
   const fanN = fo ? fo.grid.cells.length : 0;
-  const stag = Math.min(45, 1100 / Math.max(1, fanN));
+  const stag = Math.min(45, 800 / Math.max(1, fanN)); // every copy has landed within 0.8 s however many there are
   const K = { ...CK }, Q = { ...CALM };
   let fanEnd = 0;
   if (fo) {
     const g0 = h ? 300 : 250;
     fanEnd = g0 + 200 + (fanN - 1) * stag + 300;
-    const collapse = fanEnd + 350;
+    const collapse = fanEnd + 250;
     Object.assign(K, { before: g0 - 50, fan: g0, cells: g0 + 200, hl: fanEnd + 100, factor: fanEnd + 150, collapse, after: collapse,
-      once: collapse + 480, strike: collapse + 650, ratio: collapse + 900, why: collapse + 1100 });
+      once: collapse + 420, strike: collapse + 560, ratio: collapse + 760, why: collapse + 900 });
     Object.assign(Q, { fan: g0, cells: g0 + 200, factor: fanEnd + 150, word: fanEnd + 500, why: fanEnd + 900 });
   } else if (flagged && h) {
     Object.assign(K, { before: 250, hl: 700, after: 1000, strike: 1500, ratio: 1800, why: 2100 });
@@ -1076,12 +1130,18 @@ function showCheck(m, animate) {
     // The map draws 11 px labels; lay it out narrower and enlarge the SVG so they show at 0.72rem or more.
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
     const k = Math.max(1, (0.72 * rem) / 11);
-    JoinMap.render(mapBox, schema, { ...c, sql: c.sql || "" }, { mode: "wide", neighbours: false, width: w / k, animate: !!play });
-    const svg = mapBox.querySelector("svg");
-    if (!svg || !svg.viewBox.baseVal.width) return;
-    const sw = Number(svg.getAttribute("width")), sh = Number(svg.getAttribute("height"));
-    const label = 11 * (sw / svg.viewBox.baseVal.width) * k; // px of its smallest labels at this size
-    mapBox.hidden = label < 0.6 * rem; // a query with many tables shrinks it past reading; the explanation names them
+    // Every table first; if that shrinks the labels past reading, only the counted table, the repeating one and
+    // the JOIN path between them (the rest as one "+N tables" box); if even that is too small, no map.
+    let svg = null, sw = 0, sh = 0, label = 0;
+    for (const focus of [false, true]) {
+      const out = JoinMap.render(mapBox, schema, { ...c, sql: c.sql || "" }, { mode: "wide", neighbours: false, width: w / k, animate: !!play, focus });
+      svg = mapBox.querySelector("svg");
+      if (!svg || !svg.viewBox.baseVal.width) return;
+      sw = Number(svg.getAttribute("width")); sh = Number(svg.getAttribute("height"));
+      label = 11 * (sw / svg.viewBox.baseVal.width) * k; // px of its smallest labels at this size
+      if (label >= 0.56 * rem || !out.counted) break;
+    }
+    mapBox.hidden = label < 0.56 * rem; // the explanation names the tables
     if (!mapBox.hidden) { svg.setAttribute("width", Math.round(sw * k)); svg.setAttribute("height", Math.round(sh * k)); }
   };
   if (flagged) {
@@ -1129,31 +1189,42 @@ function showCheck(m, animate) {
   let fitReady = false;
   if (diffable) at(K.why, () => { diffOn = true; if (fitReady) fit(); });
   if (mapBox) {
-    at(whyT, () => { if (!mapPlayed) { mapPlayed = true; mapW = 0; drawMap(true); } });
+    at(whyT, () => { if (!mapPlayed) { mapPlayed = true; mapW = 0; const off = mapBox.hidden; drawMap(true); if (off) mapBox.hidden = true; } }); // same size: fitWhy's call stands
     ckSchema(db).then((x) => { schema = x; mapW = 0; if (fitReady) fit(); });
   }
 
   // Lay out the query and the why column for the space there is. Runs again once Poppins has loaded.
-  const fitDiff = () => { // largest type at which both columns fit whole
-    let ctl = null;
-    for (const f of [0.9, 0.82, 0.75, 0.68, 0.62, 0.56]) {
-      left.style.setProperty("--sdfs", f + "rem");
-      ctl = SqlDiff.render(left, sql, cor.sql, { copy: false, animate: false });
-      if (left.scrollHeight <= left.clientHeight + 1) break;
+  // The diff: whole at the largest type that fits; failing that, compact (only the changed lines with 2, 1, then
+  // 0 lines of context, the unchanged runs folded into "⋯ N unchanged lines" rows that open on click). If even the
+  // smallest compact view is too tall, the column scrolls rather than clipping.
+  // [context lines, type size, longest run of changed lines shown before it folds too]
+  const DIFF_TRIES = [[null, 0.9], [null, 0.82], [null, 0.75], [null, 0.68], [2, 0.82], [2, 0.75], [2, 0.68], [1, 0.75], [1, 0.68], [1, 0.62],
+    [0, 0.68], [0, 0.62], [0, 0.68, 8], [0, 0.62, 8], [0, 0.62, 5], [0, 0.56, 5], [0, 0.56, 3]];
+  const fitDiff = () => {
+    left.classList.remove("open");
+    const opened = () => left.classList.add("open"); // an expanded fold may need more room than there is: scroll
+    let pick = DIFF_TRIES[DIFF_TRIES.length - 1];
+    for (const t of DIFF_TRIES) {
+      left.style.setProperty("--sdfs", t[1] + "rem");
+      SqlDiff.render(left, sql, cor.sql, { copy: false, animate: false, compact: t[0], maxRun: t[2] });
+      if (left.scrollHeight <= left.clientHeight + 1) { pick = t; break; }
     }
-    if (!diffPlayed) { // first showing: fade in, then removals strike and additions slide in
-      diffPlayed = true;
-      ctl = SqlDiff.render(left, sql, cor.sql, { copy: false, animate: true });
-      ctl.root.classList.add("enter");
-    }
+    left.style.setProperty("--sdfs", pick[1] + "rem");
+    const ctl = SqlDiff.render(left, sql, cor.sql, { copy: false, animate: !diffPlayed, compact: pick[0], maxRun: pick[2], onExpand: opened });
+    if (left.scrollHeight > left.clientHeight + 1) opened();
+    if (!diffPlayed) { diffPlayed = true; ctl.root.classList.add("enter"); } // first showing: fade in, removals strike, additions slide in
   };
   const fitWhy = () => { // why column: step the type down until it fits (long explanations list several tables)
-    why.className = "why";
-    if (mapBox) drawMap(false);
-    for (const lvl of fan || mapBox ? ["t1", "t2", "t3", "t4", "t5"] : ["t1", "t2", "t3"]) { // cumulative; t4 drops the table, t5 the verdict word
-      if (why.scrollHeight <= why.clientHeight + 1) break;
-      why.classList.add(lvl);
-    }
+    const levels = () => {
+      why.className = "why";
+      for (const lvl of fan || mapBox ? ["t1", "t2", "t3", "t4", "t5"] : ["t1", "t2", "t3"]) { // cumulative; t4 drops the table, t5 the verdict word
+        if (why.scrollHeight <= why.clientHeight + 1) return true;
+        why.classList.add(lvl);
+      }
+      return why.scrollHeight <= why.clientHeight + 1;
+    };
+    if (mapBox) { mapW = 0; drawMap(false); } // redrawn, so a map hidden at another size can come back
+    if (!levels() && mapBox && !mapBox.hidden) { mapBox.hidden = true; levels(); } // last: the map goes; the text names the tables
   };
   const fit = () => {
     if (!col.contains(left)) return;
@@ -1263,7 +1334,11 @@ function renderCov() {
     row("Answer locally", n ? pct(k / n) : "--", `${f(k)} of ${f(n)} questions`),
     row("Accuracy on those", k ? pct(right / k) : "--", k ? `${f(right)} right, ${f(k - right)} wrong answers shipped` : "No question reaches this reading"),
     row("Answering everything", n ? pct(all / n) : "--", `${f(all)} of ${f(n)} right`, "ref"));
-  $("covnote").textContent = `${SRC_NAME[covSrc]}: ${f(n)} held-out questions, out-of-fold scores.`;
+  const nd = liveNeedle();
+  const lv = $("cvlive");
+  if (lv) { lv.hidden = nd == null; if (nd != null) lv.style.left = `${(Math.min(1, Math.max(0, nd)) * 100).toFixed(2)}%`; }
+  $("covnote").textContent = `${SRC_NAME[covSrc]}: ${f(n)} held-out questions, out-of-fold scores.`
+    + (nd == null ? "" : ` Last live answer ${nd.toFixed(2)}: ${nd >= t ? "at or above" : "below"} this setting.`);
   drawCurve(rows, t);
 }
 
@@ -1283,7 +1358,7 @@ function drawCurve(rows, t) {
   const svg = $("curve");
   const W = svg.clientWidth, H = svg.clientHeight;
   const key = `${covSrc}|${W}x${H}|${rows.length}`;
-  if (key === curveKey && curveDot && svg.childElementCount) { curveDot.place(t); return; }
+  if (key === curveKey && curveDot && svg.childElementCount) { curveDot.place(t); curveDot.live(liveNeedle()); return; }
   curveKey = key;
   svg.replaceChildren();
   if (!W || !H || !rows.length) return;
@@ -1346,10 +1421,25 @@ function drawCurve(rows, t) {
     }
   }
 
+  // the last live answer: a hollow ring where a threshold at its needle would put the curve, labelled with it
+  const ring = sv("circle", { class: "live", r: 0.5 * fs }), ringT = sv("text", { class: "live-t", "font-size": small });
+  svg.append(ring, ringT);
   // the slider's threshold: one point and its drop line, moved in place as the slider moves
   const cur = sv("line", { class: "cur" }), dot = sv("circle", { class: "dot", r: 0.42 * fs });
   svg.append(cur, dot);
   curveDot = {
+    live: (nd) => {
+      let kt = 0, rt = 0;
+      if (nd != null) for (const r of rows) if (r.s >= nd) { kt++; rt += r.y; }
+      const show = nd != null && kt > 0;
+      ring.style.display = ringT.style.display = show ? "" : "none";
+      if (!show) return;
+      const x = X(kt / n), y = Y(rt / kt), right = x > W - m.r - 10 * fs;
+      ring.setAttribute("cx", x); ring.setAttribute("cy", y);
+      ringT.setAttribute("x", x + (right ? -0.8 : 0.8) * fs); ringT.setAttribute("y", y - 0.8 * fs);
+      ringT.setAttribute("text-anchor", right ? "end" : "start");
+      ringT.textContent = `Last answer ${nd.toFixed(2)}`;
+    },
     place: (thr) => {
       let kt = 0, rt = 0;
       for (const r of rows) if (r.s >= thr) { kt++; rt += r.y; }
@@ -1362,7 +1452,10 @@ function drawCurve(rows, t) {
     },
   };
   curveDot.place(t);
+  curveDot.live(liveNeedle());
 }
+// The needle of the last live answer on screen (calibrated only: an upload's number is not on this scale).
+const liveNeedle = () => (lastShown && lastShown.calibrated !== false && !(lastShown.explain && lastShown.explain.synthetic) ? needleOf(lastShown) : null);
 
 let glideStop = () => {};
 function curvePick(ev) { // a tap on the curve: the slider glides to that point, the ledger follows
@@ -1378,7 +1471,10 @@ function curvePick(ev) { // a tap on the curve: the slider glides to that point,
 }
 
 /* ---------- queue footer ---------- */
+let lastQueue = [];
 function setQueue(current, queue) {
+  lastQueue = queue || [];
+  if (attract.on) return; // the footer names the preset replay until it ends
   $("now").textContent = current ? `Answering: ${current.db_id} · ${current.question}` : "Idle";
   const q = queue || [];
   $("queue").textContent = q.length ? `Waiting ${q.length}: ` + q.map((j) => `${j.db_id} · ${j.question}`).join("   |   ") : "Queue empty";
@@ -1392,7 +1488,13 @@ let retryTimer = null;
 function onMessage(ev) {
   let m;
   try { m = JSON.parse(ev.data); } catch { return; }
+  if (m.type === "check" && attractOwn(m)) return; // the broadcast of attract mode's own fetch
+  if (m.type === "check" || m.type === "working" || m.type === "result" || m.type === "error") { attractStop(); idleArm(); }
+  if (m.type === "check") { harvest(m); lastReveal = m; }
+  if (m.type === "result") lastReveal = m;
   if (m.type === "snapshot") {
+    if (m.last && (m.last.type === "result" || m.last.type === "check")) lastReveal = m.last;
+    if (m.last && m.last.type === "check") harvest(m.last);
     currentJob = m.current;
     setQueue(m.current, m.queue);
     if (m.last && m.last.type === "result") play(m.last, false);
@@ -1433,7 +1535,7 @@ function connect() {
   clearTimeout(retryTimer);
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/table`);
-  ws.onopen = () => { retryMs = 500; setLink(true); };
+  ws.onopen = () => { retryMs = 500; setLink(true); if (gpuGone) { gpuGone = false; gpuPoll(); } };
   ws.onmessage = onMessage;
   ws.onclose = () => {
     setLink(false);
@@ -1537,7 +1639,7 @@ function renderInside(r, mode) { // mode: idle | working | animate | still
   grid.style.setProperty("--n", layers.length);
   const cells = layers.map((x, i) => layerCell(x, i, usedLayer, layers.length > 20));
   const lab = el("div", "lc lab on"); // row label for the AUROC track
-  lab.append(el("span", "pv"), el("div", "col"), el("span", "ln"), el("span", "atrk", "AUROC"), el("span", "au"), el("span", "tag"));
+  lab.append(el("span", "pv"), el("div", "col"), el("span", "ln"), el("span", "atrk", "BIRD AUROC"), el("span", "au"), el("span", "tag"));
   grid.append(lab, ...cells);
   const nP = layers.length, has0 = layers[0].layer === 0;
   const probes = has0 ? `${nP} probes (embeddings + ${nP - 1} layers)` : `${nP} probes, one per layer`;
@@ -1611,7 +1713,11 @@ $("covbtn").addEventListener("click", () => setCov(!covOn));
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== "range") return;
-  if (e.key === "h") toggleHow();
+  if (e.key === "?") { setKeys(!keysOn); return; }
+  if (keysOn && e.key === "Escape") { setKeys(false); e.stopImmediatePropagation(); return; } // Esc closes the list first
+  if (keysOn) setKeys(false);
+  if (e.key === "r") replay();
+  else if (e.key === "h") toggleHow();
   else if (e.key === "i") setInside(!insOn);
   else if (e.key === "c") setCov(!covOn);
   else if (e.key === "b") window.open("board.html", "altimeter-board");
@@ -1626,6 +1732,136 @@ addEventListener("resize", () => {
   clearTimeout(resizeT);
   resizeT = setTimeout(() => { renderCov(); if (checkMode && checkFit) checkFit(); }, 150);
 });
+
+/* ---------- "?" key list ---------- */
+let keysOn = false;
+function setKeys(on) {
+  const k = $("keys");
+  if (!k) return; // a cached table.html from before the list existed
+  keysOn = on;
+  k.classList.toggle("on", on);
+  k.setAttribute("aria-hidden", String(!on));
+}
+if ($("keys")) $("keys").addEventListener("click", () => setKeys(false));
+
+/* ---------- r: replay the last reveal (in How or Inside, that view's own build) ---------- */
+let lastReveal = null; // the last live result or check message
+function replay() {
+  if (currentJob) return; // a question in flight owns the screen
+  const v = viewNow();
+  if (v === "how" && lastShown && lastShown.explain) { renderHow(lastShown.explain, lastShown, true); return; }
+  if (v === "ins" && lastShown) { renderInside(lastShown, "animate"); return; }
+  if (v !== "live" && v !== "check") return;
+  if (!lastReveal) return;
+  if (lastReveal.type === "check") showCheck(lastReveal, true);
+  else { deferred = null; play(lastReveal, true); }
+}
+
+/* ---------- attract mode: after a minute with nothing live, the two hero checks replay in turn ----------
+   The payloads are real /api/check responses for the presets (fetched once, kept in this browser, or caught
+   from a phone's own check). Any key, tap or live message ends it at once. */
+const ATTRACT = ["club_budget", "bird197"];
+const IDLE_MS = (Number(new URLSearchParams(location.search).get("idle")) || 60) * 1000, ATTRACT_HOLD = 15000; // ?idle=s for testing
+const attract = { on: false, timer: null, idx: 0, cache: new Map(), own: new Set() };
+let idleT = null;
+function idleArm() {
+  clearTimeout(idleT);
+  idleT = setTimeout(attractStart, IDLE_MS);
+}
+const storeKey = (id) => `altimeter.attract.${id}`;
+function harvest(m) { // a check for a hero preset, from any source, is kept for the loop
+  const job = m.job || {}, c = m.check || {};
+  const p = presets.find((x) => ATTRACT.includes(x.id) && x.db_id === (c.db_id || job.db_id) && (x.question === job.question || x.sql === c.sql));
+  if (!p || !c.flagged) return;
+  const msg = { type: "check", job: { id: -1, db_id: p.db_id, question: p.question }, check: c };
+  attract.cache.set(p.id, msg);
+  try { localStorage.setItem(storeKey(p.id), JSON.stringify(msg)); } catch { /* storage full or blocked: memory only */ }
+}
+const attractOwn = (m) => { const sql = m.check && m.check.sql; if (!attract.own.has(sql)) return false; attract.own.delete(sql); return true; };
+function attractGet(id) {
+  if (attract.cache.has(id)) return Promise.resolve(attract.cache.get(id));
+  try { const v = localStorage.getItem(storeKey(id)); if (v) { const m = JSON.parse(v); attract.cache.set(id, m); return Promise.resolve(m); } } catch { /* ignore */ }
+  const p = presets.find((x) => x.id === id);
+  if (!p) return Promise.resolve(null);
+  attract.own.add(p.sql.trim()); // its broadcast comes back to this screen; that copy is ignored
+  // quiet: asks the gateway not to broadcast it (ignored by a server that does not know the flag)
+  return fetch("api/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ db_id: p.db_id, sql: p.sql, preset: p.id, quiet: true }) })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((c) => { if (!c) return null; harvest({ job: { db_id: p.db_id, question: p.question }, check: c }); return attract.cache.get(id) || null; })
+    .catch(() => null);
+}
+function attractStart() {
+  const v = viewNow();
+  if (currentJob || keysOn || !presets.length || (v !== "live" && v !== "check")) { idleArm(); return; }
+  attract.on = true;
+  attract.idx = 0;
+  document.body.classList.add("attract");
+  $("now").textContent = "Preset replay";
+  $("queue").textContent = "Any key or tap returns to live";
+  attractNext();
+}
+function attractNext() {
+  if (!attract.on) return;
+  const id = ATTRACT[attract.idx++ % ATTRACT.length];
+  attractGet(id).then((m) => {
+    if (!attract.on) return;
+    if (m) showCheck(m, true);
+    attract.timer = setTimeout(attractNext, m ? ATTRACT_HOLD : 2000);
+  });
+}
+function attractStop() {
+  if (!attract.on) return false;
+  attract.on = false;
+  clearTimeout(attract.timer);
+  document.body.classList.remove("attract");
+  setQueue(currentJob, lastQueue);
+  if (lastReveal && lastReveal.type === "check") showCheck(lastReveal, false); // back to what was on screen
+  else setCheck(false);
+  return true;
+}
+// any key or tap ends the replay (and does nothing else); any input re-arms the idle clock
+addEventListener("keydown", (e) => { if (attractStop()) { e.preventDefault(); e.stopImmediatePropagation(); } idleArm(); }, true);
+addEventListener("pointerdown", (e) => { if (attractStop()) { e.preventDefault(); e.stopPropagation(); } idleArm(); }, true);
+addEventListener("pointermove", () => idleArm(), { passive: true });
+
+/* ---------- GPU strip: GET /api/gpu every 500 ms; power over the last 30 s as a line ---------- */
+const GPU_MS = 500, GPU_N = 60, GPU_RETRY = 15000;
+const gpuPow = [];
+let gpuBusy = false, gpuGone = false;
+function gpuHide() { if ($("gpu")) $("gpu").hidden = true; gpuPow.length = 0; }
+function gpuDraw(d) {
+  const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const w = num(d.power_w), u = num(d.util_pct), mu = num(d.mem_used_mb), mt = num(d.mem_total_mb);
+  if (w == null && u == null && mu == null) { gpuHide(); return; }
+  const bits = [];
+  if (w != null) bits.push(`${Math.round(w)} W`);
+  if (u != null) bits.push(`${Math.round(u)}%`);
+  if (mu != null) bits.push(mt != null ? `${(mu / 1024).toFixed(1)}/${(mt / 1024).toFixed(1)} GB` : `${(mu / 1024).toFixed(1)} GB`);
+  $("gputxt").textContent = `GPU ${bits.join(" · ")}`;
+  $("gpu").hidden = false;
+  const svg = $("gpuspark");
+  if (w == null) { svg.replaceChildren(); return; }
+  gpuPow.push(w);
+  if (gpuPow.length > GPU_N) gpuPow.shift();
+  const W = 96, H = 18, top = Math.max(1, ...gpuPow);
+  const pts = gpuPow.map((v, i) => `${(W - (gpuPow.length - 1 - i) * (W / (GPU_N - 1))).toFixed(1)},${(H - 1 - (v / top) * (H - 2)).toFixed(1)}`);
+  svg.replaceChildren(sv("line", { class: "g0", x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5 }), sv("polyline", { points: pts.join(" ") }));
+  svg.setAttribute("aria-label", `GPU power over the last ${Math.round((gpuPow.length * GPU_MS) / 1000)} s, peak ${Math.round(top)} W`);
+}
+function gpuPoll() {
+  if (!$("gpu")) return; // no strip in this page version
+  if (document.visibilityState !== "visible" || gpuBusy) { setTimeout(gpuPoll, GPU_MS); return; }
+  gpuBusy = true;
+  fetch("api/gpu", { cache: "no-store" })
+    .then((r) => { if (r.status === 404) { gpuGone = true; return null; } return r.ok ? r.json() : null; })
+    .then((d) => {
+      gpuBusy = false;
+      if (gpuGone) { gpuHide(); return; } // this gateway has no /api/gpu: asked again only after it restarts (socket reconnect)
+      if (!d || d.error) { gpuHide(); setTimeout(gpuPoll, GPU_RETRY); return; }
+      gpuDraw(d); setTimeout(gpuPoll, GPU_MS);
+    })
+    .catch(() => { gpuBusy = false; gpuHide(); setTimeout(gpuPoll, GPU_RETRY); });
+}
 
 /* ---------- clouds behind the live view: the layer's height follows the needle ----------
    Ask means flying in cloud (the layer rises over the lower panel); Cruise is above it (the layer sinks away);
@@ -1678,6 +1914,8 @@ renderQuestion("", "No question yet").querySelector(".route").textContent = "";
 const params = new URLSearchParams(location.search);
 setHow(params.get("how") === "1");
 connect();
+idleArm();
+gpuPoll();
 
 // Dev-only: ?mock=check (571), check200, check140, check89 replays a recorded /api/check response;
 // ?mock=coverage[&t=0.5][&src=bird]; ?mock=stage walks a fake job through the stage messages.

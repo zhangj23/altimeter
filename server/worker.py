@@ -42,6 +42,23 @@ class JobTimeout(RuntimeError):
     pass
 
 
+class UserError(RuntimeError):
+    """A request the worker refuses on purpose; its message goes to the phone as-is."""
+
+
+OOM_MESSAGE = "The GPU ran out of memory on this question; try a shorter question or a smaller database."
+
+
+def error_message(e: BaseException) -> str:
+    """Client-facing text for a worker failure: no paths, no stack, OOM in plain words."""
+    if isinstance(e, UserError):
+        return str(e)
+    text = f"{type(e).__name__}: {e}"
+    if "out of memory" in text.lower():
+        return OOM_MESSAGE
+    return text
+
+
 def job_timeout_s() -> float:
     try:
         return float(os.environ.get("ALTIMETER_JOB_TIMEOUT", "45"))
@@ -98,8 +115,13 @@ def _cell(v: Any) -> Any:
 
 def _columns(path: str, sql: str) -> list[str] | None:
     """Column names without running the query: wrap it with LIMIT 0 (SQLite exits before the scan)."""
+    from altimeter.sqlexec import connect_guarded  # same authorizer as the query itself
+
     body = sql.strip().rstrip(";")
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        con = connect_guarded(path)
+    except sqlite3.Error:
+        return None
     deadline = time.time() + 1.0
     con.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10_000)
     try:
@@ -198,7 +220,7 @@ def _readings(model: Any, messages: list[dict[str, str]] | None, path: str, need
 
 def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None, layer_src: Any = None) -> dict[str, Any]:
     from altimeter.layers import result_fields
-    from altimeter.prompting import build_messages
+    from altimeter.prompting import MAX_SCHEMA_CHARS, build_messages, schema_text
 
     emit = emit or (lambda _stage: None)
     t_start = time.perf_counter()
@@ -207,6 +229,10 @@ def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None, layer
     if os.environ.get("ALTIMETER_STALL_TEST") == "1" and question.strip().lower() == STALL_QUESTION:
         time.sleep(3600)  # timeout test: the parent has to kill this process
     path = db_path(db_id)
+    n_schema = len(schema_text(path))  # cached per db; also checked in fake mode so tests cover it
+    if n_schema > MAX_SCHEMA_CHARS:
+        raise UserError(f"This database's schema is too large for the local model ({n_schema:,} characters; "
+                        f"the limit is {MAX_SCHEMA_CHARS:,}). Use fewer or narrower tables.")
     score = None
     messages = None
     layers: dict[str, Any] = {}
@@ -288,7 +314,10 @@ def worker_main(conn: Connection, fake: bool) -> None:
         if PROBE_PATH.is_file():
             from altimeter.probe import Probe
 
-            probe = Probe(str(PROBE_PATH))
+            try:  # a malformed probe file must not crash-loop the worker; answers go out without a needle
+                probe = Probe(str(PROBE_PATH))
+            except Exception as e:  # noqa: BLE001
+                print(f"[worker] probe not loaded: {type(e).__name__}", flush=True)
         layer_src = LayerSource()
     warm = [] if model is None else _warm_up(model, probe)
     layers_info = None
@@ -304,16 +333,22 @@ def worker_main(conn: Connection, fake: bool) -> None:
             return
         if req is None:
             return
+        failed = False
         try:
             _sync_uploads(req)
             out = _answer(model, probe, req, lambda stage: conn.send({"type": "stage", "stage": stage}), layer_src)
         except Exception as e:  # noqa: BLE001 - report any failure (e.g. CUDA OOM) to the client
-            out = {"db_id": req.get("db_id"), "question": req.get("question"), "error": f"{type(e).__name__}: {e}",
+            failed = True
+            out = {"db_id": req.get("db_id"), "question": req.get("question"), "error": error_message(e),
                    "sql": None, "columns": None, "rows": None, "probe": None}
         finally:
             if model is not None:
+                import gc
+
                 import torch
 
+                if failed:
+                    gc.collect()  # frees tensors still referenced from the caught exception's frames (OOM)
                 torch.cuda.empty_cache()
         conn.send(out)
 

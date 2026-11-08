@@ -22,7 +22,7 @@ mid-job gets the queue position / stage / finished result again when it reconnec
 Table socket /ws/table receives a snapshot on connect, then every job's events, each with
 job {id, db_id, question} and the waiting queue: queued / working / stage {stage} / result / error.
 A table "result" is the phone's result dict unchanged (same "layers", "layers_synthetic", "explain", "timing").
-Pre-flight checks are broadcast too, after each successful POST /api/check, with exactly this shape:
+Pre-flight checks are broadcast too, after each successful POST /api/check without "quiet": true, as:
   {"type": "check", "job": {"id": int, "db_id": str, "question": str (only for a preset)},
    "check": <the /api/check response object, unchanged>}
 Check ids come from the same counter as job ids, so they never collide.
@@ -33,6 +33,14 @@ expires_in_s} or 400 {error}. GET /api/upload/<id> (same shape, 404 when gone), 
 "upload:<id>" works in /api/schema, /api/check and the /ws ask; such answers carry "calibrated": false and
 "calibration_note". 15 min idle TTL, at most 8 live (oldest evicted). Uploads are not listed in /api/dbs.
 
+Cloud escalation: POST /api/escalate (server/cloud.py; schema + question only, opt-in transmit).
+GPU proof: GET /api/gpu (server/gpu.py; nvidia-smi power/utilization/memory, cached 0.5 s).
+
+Limits (one phone cannot stall the demo): one pending question per client id, at most 3 pending per IP address
+(loopback exempt: tunnel) and 30 waiting in total (else {type:"error", message}); phone messages over 16 KB or not JSON text get
+{type:"error", message:"bad message"}; JSON POST bodies over 1 MB -> 413; at most 2 /api/check run at once.
+Error text sent to phones never contains file paths.
+
 Run (inside WSL, repo root):  python -m server.app [--fake] [--port 8000]
 ALTIMETER_JOB_TIMEOUT (seconds, default 45): a job running longer gets an error and the worker restarts.
 """
@@ -41,6 +49,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import json
 import os
 import re
 import secrets
@@ -57,6 +66,8 @@ from fastapi.staticfiles import StaticFiles
 
 from altimeter.sqlexec import connect_guarded
 
+from .cloud import router as cloud_router
+from .gpu import router as gpu_router
 from .preflight import annotate, check_listeners, router as preflight_router
 from .uploads import CALIBRATION_NOTE, MAX_BYTES, PREFIX, STORE, UploadError, is_upload, parse_multipart
 from .worker import JobTimeout, WorkerClient, db_path, known_db, list_dbs
@@ -67,7 +78,34 @@ CLIENT_TTL_S = 15 * 60  # forget a client's last result after this
 STALE_JOB_S = 60.0  # skip a queued job whose phone has been gone this long
 TIMEOUT_MESSAGE = "The model took too long; try a shorter question."
 CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+MAX_QUEUE = 30  # waiting jobs, all phones together
+MAX_PENDING_PER_IP = 3  # one phone opening many sockets cannot take over the queue
+# Loopback is exempt: behind a Cloudflare tunnel (or the laptop's own tabs) every client is 127.0.0.1.
+IP_CAP_EXEMPT = {a.strip() for a in os.environ.get("ALTIMETER_IP_CAP_EXEMPT", "127.0.0.1,::1").split(",")}
+MAX_WS_TEXT = 16 * 1024  # a phone message is ~200 bytes
+MAX_BODY_BYTES = 1024 * 1024  # JSON POST bodies (uploads have their own limit)
+QUEUE_FULL_MESSAGE = "The queue is full; try again in a minute."
+BUSY_MESSAGE = "This phone already has questions waiting; wait for an answer first."
+FAILED_MESSAGE = "Something went wrong on the server; ask again."
 _job_ids = itertools.count(1)
+# Absolute paths (WSL/Linux, Windows, ~) never reach a client in an error message.
+_PATH = re.compile(r"(?<![\w.])/(?:home|mnt|tmp|usr|root|proc|opt|var|etc|data|models)/[^\s'\")]+"
+                   r"|\b[A-Za-z]:\\[^\s'\")]+|~/[^\s'\")]+")
+
+
+def public_error(msg: Any) -> Any:
+    """Strip file paths from a client-facing error string (non-strings pass through)."""
+    return _PATH.sub("<path>", msg) if isinstance(msg, str) else msg
+
+
+def scrub(res: dict[str, Any]) -> dict[str, Any]:
+    """Every *error field of a worker result (and of its audit) without file paths."""
+    for k in list(res):
+        if k == "error" or k.endswith("_error"):
+            res[k] = public_error(res[k])
+    if isinstance(res.get("audit"), dict):
+        res["audit"] = scrub(dict(res["audit"]))
+    return res
 
 
 def log(msg: str) -> None:
@@ -93,6 +131,7 @@ class Job:
     db_id: str
     question: str
     id: int = field(default_factory=lambda: next(_job_ids))
+    ip: str = ""
 
     def info(self) -> dict[str, Any]:
         return {"id": self.id, "db_id": self.db_id, "question": self.question}
@@ -199,8 +238,15 @@ class Gateway:
         elif replay and c.last is not None:
             await self.to_client(c, c.last)
 
-    async def submit(self, c: Client, db_id: str, question: str) -> None:
-        job = Job(c, db_id, question)
+    def refuse(self, ip: str) -> str | None:
+        """Why a new job from this address cannot be queued now, or None."""
+        if len(self.waiting) >= MAX_QUEUE:
+            return QUEUE_FULL_MESSAGE
+        mine = sum(1 for j in self.waiting if j.ip == ip) + (1 if self.current and self.current.ip == ip else 0)
+        return BUSY_MESSAGE if ip and ip not in IP_CAP_EXEMPT and mine >= MAX_PENDING_PER_IP else None
+
+    async def submit(self, c: Client, db_id: str, question: str, ip: str = "") -> None:
+        job = Job(c, db_id, question, ip=ip)
         c.job, c.stage, c.started = job, None, None
         self.waiting.append(job)
         await self.send(job, {"type": "queued", "position": len(self.waiting)})
@@ -252,7 +298,7 @@ class Gateway:
                 STORE.mark_sent(job.db_id, pid)
             for f in staged:  # every stage message goes out before the result
                 await asyncio.wrap_future(f)
-            res = await asyncio.to_thread(annotate, res)  # pre-flight fan-out audit of the model's SQL
+            res = scrub(await asyncio.to_thread(annotate, res))  # pre-flight fan-out audit of the model's SQL
             if upload is not None:  # the needle was calibrated on BIRD dev only
                 res["calibrated"], res["calibration_note"] = False, CALIBRATION_NOTE
             self.current = None
@@ -266,26 +312,41 @@ class Gateway:
         except Exception as e:  # noqa: BLE001
             log(f"job {job.id} failed: {type(e).__name__}: {e}")
             self.current = None
-            await self.send(job, {"type": "error", "message": str(e)})
-            await self.broadcast(job, {"type": "error", "message": str(e)})
+            msg = public_error(str(e)) if type(e) is RuntimeError else FAILED_MESSAGE
+            await self.send(job, {"type": "error", "message": msg})
+            await self.broadcast(job, {"type": "error", "message": msg})
 
     async def consume(self) -> None:
         assert self.worker is not None
         while True:
-            await self.warm()  # no-op once ready; after a timeout restart this waits for the reload
-            job = await self.queue.get()
+            try:
+                await self.consume_one()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - one bad job must never stop the queue
+                log(f"consumer error: {type(e).__name__}: {e}")
+                job, self.current = self.current, None
+                if job is not None and job.client.job is job:
+                    with suppress(Exception):
+                        await self.send(job, {"type": "error", "message": FAILED_MESSAGE})
+                await asyncio.sleep(0.5)
+
+    async def consume_one(self) -> None:
+        await self.warm()  # no-op once ready; after a timeout restart this waits for the reload
+        job = await self.queue.get()
+        if job in self.waiting:
             self.waiting.remove(job)
-            await self.announce_positions()
-            c = job.client
-            if c.ws is None and c.left_at is not None and time.time() - c.left_at > STALE_JOB_S:
-                log(f"job {job.id} skipped: its phone left {time.time() - c.left_at:.0f} s ago")
-                c.job = None
-                continue
-            self.current = job
-            c.started = time.monotonic()
-            await self.send(job, {"type": "working", "elapsed": 0.0})
-            await self.broadcast(job, {"type": "working"})
-            await self.run(job)
+        await self.announce_positions()
+        c = job.client
+        if c.ws is None and c.left_at is not None and time.time() - c.left_at > STALE_JOB_S:
+            log(f"job {job.id} skipped: its phone left {time.time() - c.left_at:.0f} s ago")
+            c.job = None
+            return
+        self.current = job
+        c.started = time.monotonic()
+        await self.send(job, {"type": "working", "elapsed": 0.0})
+        await self.broadcast(job, {"type": "working"})
+        await self.run(job)
 
 
 gw = Gateway()
@@ -320,10 +381,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(preflight_router)
+app.include_router(cloud_router)
+app.include_router(gpu_router)
 
 
 @app.middleware("http")
 async def cache_headers(request: Request, call_next: Any) -> Any:
+    if request.method in ("POST", "PUT", "PATCH") and request.url.path != "/api/upload":
+        try:
+            n = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            n = MAX_BODY_BYTES + 1
+        if n > MAX_BODY_BYTES:
+            return JSONResponse({"error": "request body too large"}, status_code=413,
+                                headers={"Cache-Control": "no-store"})
     resp = await call_next(request)
     path = request.url.path
     if path.startswith("/fonts/"):
@@ -408,7 +479,11 @@ async def upload(request: Request) -> Any:
     except UploadError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except (sqlite3.Error, MemoryError) as e:
-        return JSONResponse({"error": f"could not load the upload ({type(e).__name__}: {e})"}, status_code=400)
+        return JSONResponse({"error": f"could not load the upload ({type(e).__name__}: {public_error(str(e))})"},
+                            status_code=400)
+    except Exception as e:  # noqa: BLE001 - never a 500 with a traceback for a bad file; never log its contents
+        log(f"upload rejected: {type(e).__name__}")
+        return JSONResponse({"error": "could not read the upload"}, status_code=400)
     info = await asyncio.to_thread(STORE.info, db_id)
     log(f"upload stored: {len(info['tables']) if info else 0} tables")  # never the name, id or contents
     return info
@@ -440,9 +515,21 @@ def status() -> dict[str, Any]:
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     client: Client | None = None
+    ip = ws.client.host if ws.client else ""
     try:
         while True:
-            msg = await ws.receive_json()
+            frame = await ws.receive()
+            if frame.get("type") == "websocket.disconnect":
+                break
+            text = frame.get("text")
+            if text is None or len(text) > MAX_WS_TEXT:
+                await ws.send_json({"type": "error", "message": "bad message"})
+                continue
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                await ws.send_json({"type": "error", "message": "bad message"})
+                continue
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "hello":
@@ -463,9 +550,15 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if client.job is not None:
                 await ws.send_json({"type": "error", "message": "Your last question is still in flight."})
                 continue
-            await gw.submit(client, db_id, question)
+            why = gw.refuse(ip)
+            if why:
+                await ws.send_json({"type": "error", "message": why})
+                continue
+            await gw.submit(client, db_id, question, ip)
     except (WebSocketDisconnect, RuntimeError, ValueError):
         pass
+    except Exception as e:  # noqa: BLE001 - a bad message closes this socket only
+        log(f"phone socket error: {type(e).__name__}")
     finally:
         if client is not None:
             gw.detach(client, ws)
@@ -478,8 +571,9 @@ async def ws_table(ws: WebSocket) -> None:
         await ws.send_json(gw.snapshot())
         gw.tables.add(ws)
         while True:
-            await ws.receive_text()  # nothing to read; this only notices the disconnect
-    except (WebSocketDisconnect, RuntimeError, ValueError):
+            if (await ws.receive()).get("type") == "websocket.disconnect":  # only notices the disconnect
+                break
+    except Exception:  # noqa: BLE001 - WebSocketDisconnect, or a send to a closed socket
         pass
     finally:
         gw.tables.discard(ws)
@@ -503,7 +597,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.fake:
         os.environ["ALTIMETER_FAKE"] = "1"
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", ws_max_size=1024 * 1024)
 
 
 if __name__ == "__main__":

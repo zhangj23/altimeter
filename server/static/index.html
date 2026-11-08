@@ -134,6 +134,7 @@ body.moved:not(.test) #check { animation: from-left 220ms var(--ease) both; }
 .reading-row .read b { display: block; margin-top: 2px; font-size: var(--t4); font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
 .reading-row .read .meta { display: block; margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .reading-row .read .meta span { display: block; }
+.reading-row .read .meta i { font-style: normal; white-space: nowrap; }
 .reading-row .read .err { margin-top: 8px; }
 .reply .stage { font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
 .reply .stage b { display: block; font-size: var(--t1); font-weight: 600; color: var(--ink); }
@@ -409,6 +410,71 @@ details.schema .cols .fk { color: var(--ink-2); }
 .read .bandname.uncal { font-size: var(--t0); font-weight: 600; line-height: 1.3; color: var(--ink-2); }
 .dial.uncal .arc { stroke: var(--ink-3); opacity: 0.5; }
 
+/* band landing: the figure is readable at once; the band name lands as the needle settles, and its arc stays lit */
+.read .bandname.land { opacity: 0; transform: translateY(5px); transition: opacity 200ms ease-out, transform 280ms var(--ease); }
+.read.settled .bandname.land { opacity: 1; transform: none; }
+.dial[data-band] .arc { opacity: 0.32; transition: opacity 320ms ease-out; }
+.dial[data-band="ask"] .arc-ask, .dial[data-band="caution"] .arc-caution, .dial[data-band="cruise"] .arc-cruise { opacity: 1; }
+.reading-row .read .edge { display: block; margin-top: 6px; font-size: var(--t0); font-weight: 500; font-variant-numeric: tabular-nums; }
+.reading-row .read .edge + .meta { margin-top: 4px; }
+
+/* actions under an answer: radio the tower (Ask only), copy reading */
+.reply > section.acts { padding-top: 0; border-top: 0; }
+.reply > section.acts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.acts .fixrow { display: contents; }
+pre.copytext { flex-basis: 100%; min-width: 0; margin: 0; font-size: 12.5px; }
+
+/* cloud answer inside a run */
+.cloud h2 { margin: 0 0 2px; font-size: var(--t1); font-weight: 600; }
+.cloud .cmeta { margin: 0 0 10px; font-size: 12.5px; font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.cloud .cmeta span { display: block; }
+.cloud .audit { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); }
+
+/* radio-the-tower sheet: rises from the bottom over a dimmed panel */
+html.locked, html.locked body { overflow: hidden; }
+#tower { position: fixed; inset: 0; z-index: 10; }
+#tower[hidden] { display: none; }
+#tower .scrim { position: absolute; inset: 0; background: rgba(8, 9, 11, 0.72); opacity: 0; transition: opacity 220ms ease-out; }
+#tower.open .scrim { opacity: 1; }
+.tsheet {
+  position: absolute; left: 0; right: 0; bottom: 0; max-width: 600px; margin: 0 auto; max-height: 88%;
+  display: flex; flex-direction: column;
+  background: var(--panel-2); border-top: 1px solid var(--bezel); border-radius: 3px 3px 0 0;
+  padding: 16px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  transform: translateY(100%); transition: transform 240ms var(--ease);
+}
+#tower.open .tsheet { transform: none; }
+.tsheet h2 { margin: 0; font-size: var(--t2); font-weight: 600; }
+.tsheet .tline { margin: 2px 0 0; font-size: var(--t0); color: var(--ink-2); }
+.tsheet .tbytes { margin: 10px 0 8px; font-size: var(--t0); font-weight: 500; color: var(--ink-2); }
+.tsheet .tbytes b { font-size: var(--t4); font-weight: 600; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.tsheet [hidden] { display: none; }
+.tpay { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: 4px 0 10px; scrollbar-width: thin; scrollbar-color: var(--bezel) transparent; }
+.tpay .tk { margin: 8px 0 4px; font: 600 12.5px/1.3 var(--mono); color: var(--ink-2); }
+.tpay pre.sql { font-size: 12.5px; }
+.tsheet .err { margin: 10px 0 0; }
+.tbtns { display: flex; gap: 12px; margin-top: 12px; }
+.tbtns button { flex: 1; margin-top: 0; min-width: 0; }
+
+/* this session: one line, a list of flights and checks behind it */
+details.log { margin: 14px 0 0; border: 1px solid var(--rule); border-radius: 3px; }
+details.log summary { display: flex; align-items: center; min-height: 44px; padding: 9px 12px; font-size: var(--t0); font-weight: 600; cursor: pointer; list-style: none; }
+details.log[open] summary { margin-bottom: 0; }
+details.log ol { margin: 0; padding: 0; list-style: none; max-height: 50vh; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--rule); }
+details.log li + li { border-top: 1px solid var(--rule); }
+details.log button {
+  display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; width: 100%; min-height: 44px;
+  padding: 10px 12px; border: 0; background: none; text-align: left; cursor: pointer; font-size: var(--t0);
+}
+details.log button:active { background: var(--panel-2); }
+details.log button:focus-visible { outline-offset: -2px; }
+details.log .lk { font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
+details.log .lq { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; font-weight: 500; line-height: 1.35; }
+details.log .lq.mono { font: 12.5px/1.45 var(--mono); }
+details.log .lr { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.suggest button:disabled { color: var(--ink-3); cursor: default; }
+.suggest button:disabled small { color: var(--ink-3); }
+
 @media (max-width: 359px) {
   .reading-row { grid-template-columns: 120px 1fr; }
   /* narrowest phones: a long label keeps its words; the result drops to the next line, right-aligned */
@@ -422,6 +488,7 @@ details.schema .cols .fk { color: var(--ink-2); }
   #link.wait::before { animation: none; opacity: 0.6; }
   .clouds .l1, .clouds .l2, .clouds .l3 { animation: none; }
   .terms li, .terms .track i, .fan .fc { opacity: 1; transform: none; }
+  .read .bandname.land { opacity: 1; transform: none; }
   *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; animation-delay: 0s !important; }
 }
 </style>
@@ -443,6 +510,7 @@ details.schema .cols .fk { color: var(--ink-2); }
 
 <main class="wrap">
   <div id="check" role="tabpanel" aria-labelledby="tabCheck">
+    <details class="log" id="log" hidden><summary></summary><ol></ol></details>
     <h2 id="presetsHead">Queries to check</h2>
     <ul class="presets" id="presets" aria-labelledby="presetsHead"></ul>
     <div id="upload"></div>
@@ -472,6 +540,17 @@ details.schema .cols .fk { color: var(--ink-2); }
   </div>
   <p id="announce" class="sr" aria-live="polite"></p>
 </main>
+<div id="tower" hidden>
+  <div class="scrim"></div>
+  <section class="tsheet" role="dialog" aria-modal="true" aria-labelledby="towerHead" aria-describedby="towerLine">
+    <h2 id="towerHead">Radio the tower</h2>
+    <p class="tline" id="towerLine">Transmit sends exactly this to Gemini. No data rows.</p>
+    <p class="tbytes" id="towerBytesLine"><b id="towerBytes">--</b>bytes</p>
+    <div class="tpay" id="towerPay" tabindex="0" aria-label="Payload"></div>
+    <p class="err" id="towerErr" role="alert" hidden></p>
+    <div class="tbtns"><button type="button" class="outline" id="towerStay">Stay local</button><button type="button" class="primary" id="towerSend">Transmit</button></div>
+  </section>
+</div>
 <script src="joinmap.js"></script>
 <script src="sqldiff.js"></script>
 <script src="upload.js"></script>

@@ -4,6 +4,9 @@
      opts.labels   [before, after] column labels (default ["As written", "Corrected"])
      opts.animate  "auto" (default: play once when scrolled into view) | true (play now) | false
      opts.copy     show "Copy corrected SQL" (default true); copies afterSql exactly as given
+     opts.compact  context lines to keep around each change; the unchanged runs between fold into one row
+                   ("⋯ 12 unchanged lines") that expands on click, then calls opts.onExpand()
+     opts.maxRun   with compact: a block of more changed lines than this shows its first maxRun, the rest fold
    SqlDiff.format(sql) -> pretty-printed string. SqlDiff.diff(a, b) -> { a: tokens+status, b: tokens+status }.
    Needs sqldiff.css. No dependencies. */
 (function () {
@@ -244,7 +247,14 @@
     return ops;
   }
 
+  let memo = null; // the last pair: a caller fitting one diff at several sizes renders it many times
   function diff(beforeSql, afterSql) {
+    if (memo && memo.a === beforeSql && memo.b === afterSql) return memo.d;
+    const d = diff0(beforeSql, afterSql);
+    memo = { a: beforeSql, b: afterSql, d };
+    return d;
+  }
+  function diff0(beforeSql, afterSql) {
     const A = tokenize(beforeSql), B = tokenize(afterSql);
     const LA = layout(A), LB = layout(B);
     const lockA = new Uint8Array(A.length), lockB = new Uint8Array(B.length);
@@ -279,8 +289,48 @@
     return e;
   }
 
-  function renderCode(toks, lines, st, tag, groups) {
+  // Compact: only lines with a change plus ctx lines around them; each hidden run becomes one fold row that
+  // expands in place on click. Returns the number of lines folded away.
+  // maxRun: a run of more consecutive changed lines than this keeps only its first maxRun; the rest fold too.
+  function foldLines(code, divs, changed, ctx, onExpand, maxRun) {
+    const n = divs.length;
+    const keep = new Uint8Array(n);
+    let any = false;
+    const show = changed.slice();
+    if (maxRun > 0) {
+      for (let i = 0; i < n;) {
+        if (!changed[i]) { i++; continue; }
+        let j = i;
+        while (j < n && changed[j]) j++;
+        for (let k = i + maxRun; k < j; k++) show[k] = false;
+        i = j;
+      }
+    }
+    for (let i = 0; i < n; i++) if (show[i]) { any = true; for (let k = Math.max(0, i - ctx); k <= Math.min(n - 1, i + ctx); k++) keep[k] = 1; }
+    if (!any) return 0;
+    let hidden = 0;
+    for (let i = 0; i < n;) {
+      if (keep[i]) { code.append(divs[i]); i++; continue; }
+      let j = i;
+      while (j < n && !keep[j]) j++;
+      const run = divs.slice(i, j);
+      if (run.length === 1) { code.append(run[0]); i = j; continue; } // a fold row would take the same space
+      hidden += run.length;
+      const nCh = changed.slice(i, j).filter(Boolean).length;
+      const what = nCh ? `${run.length} more lines, ${nCh} changed` : `${run.length} unchanged lines`;
+      const fold = el("button", "sd-fold" + (nCh ? " sd-fold-ch" : ""), `⋯ ${what}`);
+      fold.type = "button";
+      fold.setAttribute("aria-label", `Show ${what}`);
+      fold.addEventListener("click", () => { fold.replaceWith(...run); if (onExpand) onExpand(); });
+      code.append(fold);
+      i = j;
+    }
+    return hidden;
+  }
+
+  function renderCode(toks, lines, st, tag, groups, compact) {
     const code = el("div", "sd-code");
+    const divs = [], changed = [];
     for (const line of lines) {
       const div = el("div", "sd-line");
       div.style.setProperty("--i", line.ind);
@@ -307,8 +357,12 @@
         prev = t;
       }
       if (all && firstGroup) div._g = firstGroup;
-      code.append(div);
+      divs.push(div);
+      changed.push(!!firstGroup);
     }
+    code._folded = 0;
+    if (compact) code._folded = foldLines(code, divs, changed, compact.ctx, compact.onExpand, compact.maxRun);
+    if (!code._folded) code.replaceChildren(...divs);
     return code;
   }
 
@@ -372,10 +426,13 @@
     const cols = el("div", "sd-cols");
     const dels = [], adds = [];
 
+    // opts.compact: number of context lines kept around each change (0 or more); null/undefined shows every line
+    const compact = opts.compact != null && opts.compact !== false ? { ctx: Math.max(0, Number(opts.compact) || 0), onExpand: opts.onExpand, maxRun: Number(opts.maxRun) || 0 } : null;
     const before = el("section", "sd-col sd-before");
-    before.append(el("h3", "sd-head", labels[0]), renderCode(d.A, d.LA.lines, d.sa, "del", dels));
+    const beforeCode = renderCode(d.A, d.LA.lines, d.sa, "del", dels, compact);
+    before.append(el("h3", "sd-head", labels[0]), beforeCode);
     const after = el("section", "sd-col sd-after");
-    const afterCode = renderCode(d.B, d.LB.lines, d.sb, "ins", adds);
+    const afterCode = renderCode(d.B, d.LB.lines, d.sb, "ins", adds, compact);
     after.append(el("h3", "sd-head", labels[1]), afterCode);
     if (opts.copy !== false && afterSql) after.append(copyButton(afterSql, afterCode));
     cols.append(before, after);
@@ -409,6 +466,7 @@
       replay: () => { if (root.classList.contains("sd-anim")) play(); },
       removed: dels.length,
       added: adds.length,
+      folded: beforeCode._folded + afterCode._folded, // lines hidden behind fold rows (compact mode)
     };
   }
 

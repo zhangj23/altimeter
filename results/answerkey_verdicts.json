@@ -1,0 +1,727 @@
+[
+ {
+  "question_id": 96,
+  "db_id": "financial",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 9704980.17,
+  "corrected_answer": 48653.74,
+  "reason": "loan and trans are both LEFT JOINed to the account, so each loan amount is summed once per transaction; avg_loan_amount for M/Senior/central Bohemia 9,704,980.17 vs 48,653.74 when loans and transactions are aggregated separately; 24 of 30 rows change.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the demographic breakdown and financial profile of account owners who receive weekly statements, segmented by gender, age group, and region?",
+  "corrected_sql": "WITH CustomerWeeklyStatements AS ( SELECT T2.client_id, T1.account_id, T1.district_id, T1.date AS account_open_date, COUNT(DISTINCT T3.card_id) AS num_cards FROM account AS T1 INNER JOIN disp AS T2 ON T1.account_id = T2.account_id LEFT JOIN card AS T3 ON T2.disp_id = T3.disp_id WHERE T2.type = 'OWNER' AND T1.frequency = 'POPLATEK TYDNE' GROUP BY T2.client_id, T1.account_id, T1.district_id, T1.date ), ClientInfo AS ( SELECT c.client_id, c.gender, c.birth_date, CASE WHEN strftime('%Y', 'now') - strftime('%Y', c.birth_date) - (strftime('%m-%d', 'now') < strftime('%m-%d', c.birth_date)) < 30 THEN 'Young' WHEN strftime('%Y', 'now') - strftime('%Y', c.birth_date) - (strftime('%m-%d', 'now') < strftime('%m-%d', c.birth_date)) BETWEEN 30 AND 50 THEN 'Middle-aged' ELSE 'Senior' END AS age_group, d.A2 AS district_name, d.A3 AS region FROM client c JOIN district d ON c.district_id = d.district_id ), LoanAndTransactionData AS ( SELECT c.client_id, COALESCE(L.num_loans,0) AS num_loans, COALESCE(L.total_loan_amount,0) AS total_loan_amount, COALESCE(L.max_loan_amount,0) AS max_loan_amount, COALESCE(T.num_transactions,0) AS num_transactions, COALESCE(T.total_income,0) AS total_income, COALESCE(T.total_expense,0) AS total_expense FROM (SELECT DISTINCT client_id FROM CustomerWeeklyStatements) c LEFT JOIN (SELECT cws.client_id, COUNT(DISTINCT l.loan_id) AS num_loans, SUM(l.amount) AS total_loan_amount, MAX(l.amount) AS max_loan_amount FROM CustomerWeeklyStatements cws JOIN loan l ON cws.account_id = l.account_id GROUP BY cws.client_id) L ON L.client_id = c.client_id LEFT JOIN (SELECT cws.client_id, COUNT(DISTINCT t.trans_id) AS num_transactions, SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END) AS total_income, SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END) AS total_expense FROM CustomerWeeklyStatements cws JOIN trans t ON cws.account_id = t.account_id GROUP BY cws.client_id) T ON T.client_id = c.client_id ) SELECT COUNT(DISTINCT cws.client_id) AS total_weekly_owners, ci.gender, ci.age_group, ci.region, ROUND(AVG(cws.num_cards), 2) AS avg_cards_per_customer, ROUND(AVG(ltd.num_loans), 2) AS avg_loans_per_customer, ROUND(AVG(ltd.total_loan_amount), 2) AS avg_loan_amount, ROUND(AVG(ltd.num_transactions), 2) AS avg_transactions, ROUND(AVG(ltd.total_income - ltd.total_expense), 2) AS avg_net_balance, COUNT(DISTINCT CASE WHEN ltd.num_loans > 0 THEN cws.client_id END) AS customers_with_loans, ROUND(COUNT(DISTINCT CASE WHEN ltd.num_loans > 0 THEN cws.client_id END) * 100.0 / COUNT(DISTINCT cws.client_id), 2) AS percent_with_loans FROM CustomerWeeklyStatements cws JOIN ClientInfo ci ON cws.client_id = ci.client_id JOIN LoanAndTransactionData ltd ON cws.client_id = ltd.client_id GROUP BY ci.gender, ci.age_group, ci.region ORDER BY total_weekly_owners DESC;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 140,
+  "db_id": "financial",
+  "verdict": "TRUE_BUG",
+  "gold_answer": [
+   36200426,
+   32012787
+  ],
+  "corrected_answer": [
+   31522862,
+   27931632
+  ],
+  "reason": "trans is LEFT JOINed with disp/card, so accounts with 2 dispositions have their transactions summed twice; total deposits / withdrawals 36,200,426 / 32,012,787 vs 31,522,862 / 27,931,632 (equal to a direct SUM over Pisek transactions).",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the comprehensive financial profile of all accounts in the Pisek district, including the total number of accounts, average transactions per account, total deposits and withdrawals, average maximum balance, total credit cards issued, total loans issued, percentage of active loan amounts, and number of unique account owners?",
+  "corrected_sql": "WITH PisekAccounts AS ( SELECT a.account_id, a.district_id, a.frequency, a.date, d.A2 AS district_name FROM account AS a INNER JOIN district AS d ON a.district_id = d.district_id WHERE d.A2 = 'Pisek' ), AccountStats AS ( SELECT pa.account_id, (SELECT COUNT(DISTINCT t.trans_id) FROM trans t WHERE t.account_id = pa.account_id) AS transaction_count, (SELECT SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END) FROM trans t WHERE t.account_id = pa.account_id) AS total_deposits, (SELECT SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END) FROM trans t WHERE t.account_id = pa.account_id) AS total_withdrawals, (SELECT MAX(t.balance) FROM trans t WHERE t.account_id = pa.account_id) AS max_balance, (SELECT COUNT(DISTINCT c.card_id) FROM disp d JOIN card c ON d.disp_id = c.disp_id WHERE d.account_id = pa.account_id) AS card_count FROM PisekAccounts pa ), LoanInfo AS ( SELECT pa.account_id, COUNT(l.loan_id) AS loan_count, SUM(l.amount) AS total_loan_amount, SUM(CASE WHEN l.status = 'A' THEN l.amount ELSE 0 END) AS active_loan_amount, AVG(l.duration) AS avg_loan_duration FROM PisekAccounts pa LEFT JOIN loan l ON pa.account_id = l.account_id GROUP BY pa.account_id ) SELECT COUNT(pa.account_id) AS total_pisek_accounts, AVG(ast.transaction_count) AS avg_transactions_per_account, SUM(ast.total_deposits) AS total_deposits_all_accounts, SUM(ast.total_withdrawals) AS total_withdrawals_all_accounts, AVG(ast.max_balance) AS avg_max_balance, SUM(ast.card_count) AS total_cards_issued, SUM(li.loan_count) AS total_loans_issued, SUM(li.active_loan_amount) / CASE WHEN SUM(li.total_loan_amount) = 0 THEN 1 ELSE SUM(li.total_loan_amount) END * 100 AS percent_active_loans, (SELECT COUNT(DISTINCT c.client_id) FROM PisekAccounts pa JOIN disp d ON pa.account_id = d.account_id JOIN client c ON d.client_id = c.client_id WHERE d.type = 'OWNER') AS unique_account_owners FROM PisekAccounts pa LEFT JOIN AccountStats ast ON pa.account_id = ast.account_id LEFT JOIN LoanInfo li ON pa.account_id = li.account_id;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 150,
+  "db_id": "financial",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 2260,
+  "corrected_answer": 55,
+  "reason": "Asks how many accounts; gold counts transactions (2,260, while North Bohemia has only 457 accounts); distinct accounts = 55.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many accounts in North Bohemia has made a transaction with the partner's bank being AB?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T2.account_id) FROM district T1 JOIN account T2 ON T1.district_id=T2.district_id JOIN trans T3 ON T2.account_id=T3.account_id WHERE T3.bank='AB' AND T1.A3='north Bohemia'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 154,
+  "db_id": "financial",
+  "verdict": "TRUE_BUG",
+  "gold_answer": [
+   8645,
+   787,
+   229686859
+  ],
+  "corrected_answer": [
+   14,
+   2,
+   193957096
+  ],
+  "reason": "loan x disp x card x trans per account; Senior good loans / bad loans / income 8,645 / 787 / 229,686,859 vs 14 / 2 / 193,957,096 (the whole DB has 203 status-A loans).",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the financial profile and banking behavior of male clients in Prague district, broken down by age groups (Young, Middle-aged, and Senior)?",
+  "corrected_sql": "WITH PrahaClients AS ( SELECT c.client_id, c.gender, c.birth_date, d.A2 AS district_name, CASE WHEN strftime('%Y', 'now') - strftime('%Y', c.birth_date) - (strftime('%m-%d', 'now') < strftime('%m-%d', c.birth_date)) < 30 THEN 'Young' WHEN strftime('%Y', 'now') - strftime('%Y', c.birth_date) - (strftime('%m-%d', 'now') < strftime('%m-%d', c.birth_date)) BETWEEN 30 AND 50 THEN 'Middle-aged' ELSE 'Senior' END AS age_category FROM client AS c INNER JOIN district AS d ON c.district_id = d.district_id WHERE c.gender = 'M' AND d.A2 = 'Hl.m. Praha' ), ClientAccounts AS ( SELECT pc.client_id, pc.gender, pc.age_category, a.account_id, (SELECT COUNT(DISTINCT l.loan_id) FROM loan l WHERE l.account_id = a.account_id) AS loan_count, (SELECT COUNT(*) FROM loan l WHERE l.account_id = a.account_id AND l.status = 'A') AS good_loans, (SELECT COUNT(*) FROM loan l WHERE l.account_id = a.account_id AND l.status = 'B') AS bad_loans, (SELECT COUNT(DISTINCT c.card_id) FROM disp dp2 JOIN card c ON dp2.disp_id = c.disp_id WHERE dp2.account_id = a.account_id) AS card_count, (SELECT COUNT(DISTINCT t.trans_id) FROM trans t WHERE t.account_id = a.account_id) AS transaction_count, (SELECT COALESCE(SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END),0) FROM trans t WHERE t.account_id = a.account_id) AS total_income, (SELECT COALESCE(SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END),0) FROM trans t WHERE t.account_id = a.account_id) AS total_expense FROM PrahaClients pc INNER JOIN disp AS dp ON pc.client_id = dp.client_id AND dp.type = 'OWNER' INNER JOIN account AS a ON dp.account_id = a.account_id GROUP BY pc.client_id, pc.gender, pc.age_category, a.account_id ) SELECT age_category, COUNT(DISTINCT client_id) AS client_count, AVG(loan_count) AS avg_loans_per_client, SUM(good_loans) AS total_good_loans, SUM(bad_loans) AS total_bad_loans, AVG(card_count) AS avg_cards_per_client, AVG(transaction_count) AS avg_transactions_per_client, SUM(total_income) AS total_income_all_clients, SUM(total_expense) AS total_expense_all_clients, SUM(total_income - total_expense) AS net_balance_all_clients FROM ClientAccounts GROUP BY age_category HAVING COUNT(DISTINCT client_id) > 0 ORDER BY CASE WHEN age_category = 'Young' THEN 1 WHEN age_category = 'Middle-aged' THEN 2 WHEN age_category = 'Senior' THEN 3 END;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 197,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 116.65273311897106,
+  "corrected_answer": 3.3536977491961415,
+  "reason": "Each oxygen atom is counted once per single bond in its molecule; average oxygen atoms per single-bonded molecule 116.65 vs 3.354.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Calculate the average number of oxygen atoms in single-bonded molecules.",
+  "corrected_sql": "SELECT AVG(n) FROM (SELECT molecule_id, COUNT(*) n FROM atom WHERE element='o' AND molecule_id IN (SELECT molecule_id FROM bond WHERE bond_type='-') GROUP BY molecule_id)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 198,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 732.125,
+  "corrected_answer": 20.25,
+  "reason": "Wording is murky, but the gold's own structure counts single bonds per carcinogenic molecule and the atom join multiplies that count; gold 732.125 equals AVG(#single bonds x #atoms) exactly; per-molecule single bonds 20.25 (0.834 under the evidence ratio). No reading gives 732.125.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "On average how many carcinogenic molecules are single bonded?",
+  "corrected_sql": "SELECT AVG(n) FROM (SELECT b.molecule_id, COUNT(*) n FROM bond b JOIN molecule m ON b.molecule_id=m.molecule_id WHERE b.bond_type='-' AND m.label='+' GROUP BY b.molecule_id)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 200,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": [
+   [
+    "TR041",
+    14,
+    14,
+    112,
+    28,
+    28,
+    0,
+    4,
+    "Multiple Triple Bonds"
+   ],
+   [
+    "TR499",
+    4,
+    3,
+    0,
+    0,
+    4,
+    0,
+    0,
+    "Multiple Triple Bonds"
+   ]
+  ],
+  "corrected_answer": [
+   [
+    "TR041",
+    14,
+    14,
+    8,
+    2,
+    2,
+    0,
+    4,
+    "Multiple Triple Bonds"
+   ],
+   [
+    "TR499",
+    4,
+    3,
+    0,
+    0,
+    1,
+    0,
+    0,
+    "Single Triple Bond"
+   ]
+  ],
+  "reason": "atom x bond cross product; TR041 carbon / nitrogen / triple bonds 112 / 28 / 28 vs 8 / 2 / 2 (TR041 has 14 atoms); TR499 has 1 triple bond, gold labels it 'Multiple Triple Bonds'.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For carcinogenic molecules that contain triple bonds, provide detailed statistics including atom counts, bond counts, carbon and nitrogen counts, and specifically identify how many nitrogen-to-nitrogen triple bonds and carbon-containing triple bonds exist in each molecule, categorizing them by their number of triple bonds.",
+  "corrected_sql": "WITH MoleculeStats AS ( SELECT m.molecule_id, m.label, COUNT(DISTINCT a.atom_id) AS atom_count, COUNT(DISTINCT b.bond_id) AS bond_count, COUNT(DISTINCT CASE WHEN a.element = 'c' THEN a.atom_id END) AS carbon_count, COUNT(DISTINCT CASE WHEN a.element = 'n' THEN a.atom_id END) AS nitrogen_count, COUNT(DISTINCT CASE WHEN b.bond_type = '#' THEN b.bond_id END) AS triple_bond_count FROM molecule m LEFT JOIN atom a ON m.molecule_id = a.molecule_id LEFT JOIN bond b ON m.molecule_id = b.molecule_id GROUP BY m.molecule_id, m.label ), TripleBondedAtoms AS ( SELECT c.atom_id, c.atom_id2, a1.element AS element1, a2.element AS element2, b.molecule_id FROM connected c JOIN bond b ON c.bond_id = b.bond_id JOIN atom a1 ON c.atom_id = a1.atom_id JOIN atom a2 ON c.atom_id2 = a2.atom_id WHERE b.bond_type = '#' ) SELECT ms.molecule_id, ms.atom_count, ms.bond_count, ms.carbon_count, ms.nitrogen_count, ms.triple_bond_count, (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND tba.element1 = 'n' AND tba.element2 = 'n') AS nitrogen_triple_bonds, (SELECT COUNT(*) FROM TripleBondedAtoms tba WHERE tba.molecule_id = ms.molecule_id AND (tba.element1 = 'c' OR tba.element2 = 'c')) AS carbon_containing_triple_bonds, CASE WHEN ms.triple_bond_count > 1 THEN 'Multiple Triple Bonds' WHEN ms.triple_bond_count = 1 THEN 'Single Triple Bond' ELSE 'No Triple Bonds' END AS bond_category FROM MoleculeStats ms WHERE ms.label = '+' AND ms.triple_bond_count > 0 ORDER BY ms.triple_bond_count DESC, ms.atom_count DESC;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 204,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": [
+   279.13793103448273,
+   106.86206896551724
+  ],
+  "corrected_answer": [
+   8.793103448275861,
+   3.5517241379310347
+  ],
+  "reason": "atom x bond cross product; avg carbon atoms / avg double bonds per carcinogenic molecule 279.14 / 106.86 vs 8.79 / 3.55.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What are the average structural characteristics of carcinogenic molecules among the first 100 molecules, including the number of atoms, carbon atoms, bonds, double bonds, connected atoms, and the ratio of carbon-to-carbon connections?",
+  "corrected_sql": "WITH MoleculeInfo AS ( SELECT m.molecule_id, m.label, COUNT(DISTINCT a.atom_id) AS atom_count, COUNT(DISTINCT b.bond_id) AS bond_count, COUNT(DISTINCT CASE WHEN a.element = 'c' THEN a.atom_id END) AS carbon_count, COUNT(DISTINCT CASE WHEN a.element = 'h' THEN a.atom_id END) AS hydrogen_count, COUNT(DISTINCT CASE WHEN a.element = 'o' THEN a.atom_id END) AS oxygen_count, COUNT(DISTINCT CASE WHEN a.element = 'n' THEN a.atom_id END) AS nitrogen_count, COUNT(DISTINCT CASE WHEN a.element NOT IN ('c', 'h', 'o', 'n') THEN a.atom_id END) AS other_element_count, COUNT(DISTINCT CASE WHEN b.bond_type = '=' THEN b.bond_id END) AS double_bond_count, ROW_NUMBER() OVER (ORDER BY m.molecule_id) AS molecule_rank FROM molecule m LEFT JOIN atom a ON m.molecule_id = a.molecule_id LEFT JOIN bond b ON m.molecule_id = b.molecule_id WHERE m.molecule_id BETWEEN 'TR000' AND 'TR099' GROUP BY m.molecule_id, m.label ), ConnectionStats AS ( SELECT m.molecule_id, COUNT(DISTINCT c.atom_id) AS connected_atoms, AVG(CASE WHEN a.element = 'c' AND a2.element = 'c' THEN 1 ELSE 0 END) AS carbon_carbon_ratio FROM molecule m JOIN atom a ON m.molecule_id = a.molecule_id JOIN connected c ON a.atom_id = c.atom_id JOIN atom a2 ON c.atom_id2 = a2.atom_id WHERE m.molecule_id BETWEEN 'TR000' AND 'TR099' GROUP BY m.molecule_id ) SELECT COUNT(mi.molecule_id) AS carcinogenic_count, AVG(mi.atom_count) AS avg_atoms_in_carcinogenic, AVG(mi.carbon_count) AS avg_carbon_in_carcinogenic, AVG(mi.bond_count) AS avg_bonds_in_carcinogenic, AVG(mi.double_bond_count) AS avg_double_bonds_in_carcinogenic, AVG(cs.connected_atoms) AS avg_connected_atoms, AVG(cs.carbon_carbon_ratio) AS avg_carbon_carbon_ratio FROM MoleculeInfo mi LEFT JOIN ConnectionStats cs ON mi.molecule_id = cs.molecule_id WHERE mi.label = '+' AND mi.molecule_rank <= 100 AND (mi.carbon_count > 0 OR mi.hydrogen_count > 0)",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 205,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": [
+   "TR059",
+   4494,
+   428,
+   1122
+  ],
+  "corrected_answer": [
+   "TR059",
+   42,
+   4,
+   11
+  ],
+  "reason": "atom x bond cross product; TR059 carbon / chlorine / double bonds 4,494 / 428 / 1,122 vs 42 / 4 / 11; all 340 rows change and the carbon ranking reorders.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For all molecules containing carbon, provide comprehensive statistics including the number of atoms, bonds, carbon atoms, chlorine atoms, and double bonds. Rank these molecules by their carbon content (highest first), and for ties, rank by total atom count. Also include the total number of atomic connections in each molecule.",
+  "corrected_sql": "WITH CarbonMolecules AS ( SELECT DISTINCT a.molecule_id FROM atom AS a WHERE a.element = 'c' ), MoleculeStats AS ( SELECT m.molecule_id, m.label, COUNT(DISTINCT a.atom_id) AS atom_count, COUNT(DISTINCT b.bond_id) AS bond_count, COUNT(DISTINCT CASE WHEN a.element = 'c' THEN a.atom_id END) AS carbon_count, COUNT(DISTINCT CASE WHEN a.element = 'cl' THEN a.atom_id END) AS chlorine_count, COUNT(DISTINCT CASE WHEN b.bond_type = '=' THEN b.bond_id END) AS double_bond_count FROM molecule m JOIN atom a ON m.molecule_id = a.molecule_id LEFT JOIN bond b ON m.molecule_id = b.molecule_id WHERE m.molecule_id IN (SELECT molecule_id FROM CarbonMolecules) GROUP BY m.molecule_id, m.label ), RankedMolecules AS ( SELECT molecule_id, label, atom_count, bond_count, carbon_count, chlorine_count, double_bond_count, RANK() OVER (ORDER BY carbon_count DESC, atom_count DESC) AS carbon_rank FROM MoleculeStats ) SELECT rm.molecule_id, rm.label, rm.atom_count, rm.bond_count, rm.carbon_count, rm.chlorine_count, rm.double_bond_count, rm.carbon_rank, (SELECT COUNT(DISTINCT c.atom_id2) FROM connected c JOIN atom a ON c.atom_id = a.atom_id WHERE a.molecule_id = rm.molecule_id) AS connections_count FROM RankedMolecules rm ORDER BY rm.carbon_rank, rm.molecule_id;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 207,
+  "db_id": "toxicology",
+  "verdict": "FALSE_ALARM",
+  "gold_answer": "5 rows",
+  "corrected_answer": "identical to gold (5 rows)",
+  "reason": "Timeout-dependent (flagged only by v2 at 5 s). The inflated double_bonds_count is used only in HAVING > 0; result identical after de-duplication (5 rows).",
+  "flagged_by": "v2 (5 s) only",
+  "in_v2_37": true,
+  "in_v2_15s_37": false,
+  "question": "For each element that participates in double bonds, what is the count of atoms, the number of molecules containing them, their percentage of all atoms in the database, and examples of up to 3 molecules (with labels) where they appear in double bonds?",
+  "corrected_sql": "WITH ElementsInDoubleBonds AS ( SELECT T1.element, T1.atom_id, T1.molecule_id FROM atom AS T1 INNER JOIN connected AS T3 ON T1.atom_id = T3.atom_id INNER JOIN bond AS T2 ON T3.bond_id = T2.bond_id WHERE T2.bond_type = '=' ), MoleculeStats AS ( SELECT m.molecule_id, m.label, COUNT(DISTINCT a.atom_id) AS total_atoms, COUNT(DISTINCT b.bond_id) AS total_bonds, COUNT(DISTINCT CASE WHEN b.bond_type = '=' THEN b.bond_id END) AS double_bonds_count FROM molecule m LEFT JOIN atom a ON m.molecule_id = a.molecule_id LEFT JOIN bond b ON m.molecule_id = b.molecule_id GROUP BY m.molecule_id, m.label HAVING double_bonds_count > 0 ) SELECT e.element, COUNT(DISTINCT e.atom_id) AS atom_count, COUNT(DISTINCT e.molecule_id) AS molecule_count, ROUND(COUNT(DISTINCT e.atom_id) * 100.0 / (SELECT COUNT(*) FROM atom), 2) AS percentage_of_all_atoms, ( SELECT GROUP_CONCAT(ms.molecule_id || ' (' || ms.label || ')', ', ') FROM MoleculeStats ms WHERE ms.molecule_id IN (SELECT DISTINCT edb.molecule_id FROM ElementsInDoubleBonds edb WHERE edb.element = e.element) LIMIT 3 ) AS sample_molecules FROM ElementsInDoubleBonds e GROUP BY e.element ORDER BY atom_count DESC, e.element ASC;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 269,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 12,
+  "corrected_answer": "6 bonds touching iodine (4 distinct bonds on the gold path)",
+  "reason": "3 iodine atoms x 4 bonds in TR110 gives 12; bonds touching an iodine atom = 6 (connected table; TR110 and TR340, but TR340 is missing from the molecule table so the gold path drops it); distinct bonds on the gold path = 4. 12 is wrong under every reading.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many bond id have element iodine?",
+  "corrected_sql": "SELECT COUNT(DISTINCT c.bond_id) FROM connected c JOIN atom a ON c.atom_id=a.atom_id WHERE a.element='i'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 298,
+  "db_id": "toxicology",
+  "verdict": "UNCLEAR",
+  "gold_answer": 17.22094171880145,
+  "corrected_answer": "41.98 of all molecules / 94.74 of carcinogenic molecules",
+  "reason": "Garbled wording ('percentage of molecules containing carcinogenic compounds that element is hydrogen'). Gold 17.22 = H atoms in carcinogenic molecules / all atoms. Counting molecules gives 41.98 (of all molecules) or 94.74 (of carcinogenic ones); an atom-level reading is not impossible, so left UNCLEAR.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Calculate the percentage of molecules containing carcinogenic compounds that element is hydrogen.",
+  "corrected_sql": "SELECT COUNT(DISTINCT CASE WHEN m.label='+' AND m.molecule_id IN (SELECT molecule_id FROM atom WHERE element='h') THEN m.molecule_id END)*100.0/COUNT(*) FROM molecule m",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 330,
+  "db_id": "toxicology",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 100.0,
+  "corrected_answer": 50.0,
+  "reason": "Molecules with an H atom and a triple bond: TR377 (-) and TR499 (+), so 50%; gold's numerator counts TR499's 2 joined rows over 2 distinct molecules and returns 100.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Calculate the percentage of carcinogenic molecules with triple bonded Hidrogen atoms.",
+  "corrected_sql": "SELECT 100.0*SUM(label='+')/COUNT(*) over molecules having an 'h' atom and a '#' bond",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 363,
+  "db_id": "card_games",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 205,
+  "corrected_answer": 189,
+  "reason": "Asks how many cards; gold counts legality rows: 205 vs 189 distinct cards.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many cards of legalities whose status is restricted are found in a starter deck?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.id), COUNT(DISTINCT T1.uuid) FROM cards T1 JOIN legalities T2 ON T1.uuid=T2.uuid WHERE T2.status='Restricted' AND T1.isStarter=1",
+  "other_releases": {
+   "2024_dev": "different gold SQL: SELECT COUNT(DISTINCT T1.id) FROM cards AS T1 INNER JOIN legalities AS T2 ON T1.uuid = T2.uuid WHERE T2.status = 'Restricted' AND T1.isStarter = 1",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 386,
+  "db_id": "card_games",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 582,
+  "corrected_answer": 93,
+  "reason": "Asks how many legal cards; gold counts legality rows: 582 vs 93 distinct cards.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many legal cards are having future frame version?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.id) FROM cards T1 JOIN legalities T2 ON T1.uuid=T2.uuid WHERE T1.frameVersion='future' AND T2.status='Legal'",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 520,
+  "db_id": "card_games",
+  "verdict": "FALSE_ALARM",
+  "gold_answer": [
+   "Anna Pavleeva",
+   "gladiator"
+  ],
+  "corrected_answer": "tie: 190 artists with 1 card (Anna Pavleeva among them); auditor rewrite returns [(None, 'commander')]",
+  "reason": "Minimum is 1 card per artist with 190 artists tied (83 that have legalities); gold's Anna Pavleeva has 1 card, so she is a valid least-illustrator; the fan-out only changes tie-breaking. The auditor's rewrite returns a NULL artist, which is worse. (Gold separately lists only 1 of her 2 formats, a GROUP BY bug, not fan-out.)",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Who is the illustrator that illustrated the least amount of cards? List the format of play of the cards that he/she illustrated.",
+  "corrected_sql": "SELECT MIN(n), SUM(n=(SELECT MIN(n2) FROM (SELECT COUNT(DISTINCT id) n2 FROM cards WHERE artist IS NOT NULL GROUP BY artist))) FROM (SELECT artist, COUNT(DISTINCT id) n FROM cards WHERE artist IS NOT NULL GROUP BY artist)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 672,
+  "db_id": "codebase_community",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 19,
+  "corrected_answer": "14 (18 if SUM per user)",
+  "reason": "Asks how many users; gold counts posts: 19 vs 14 distinct users (18 if 'total favorite amount' means SUM per user). Either reading differs from 19.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Among the users located in United Kingdom, how many users whose post have a total favorite amount of 4 or more?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.Id) FROM users T1 JOIN posts T2 ON T1.Id=T2.OwnerUserId WHERE T1.Location='United Kingdom' AND T2.FavoriteCount>=4",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 677,
+  "db_id": "codebase_community",
+  "verdict": "FALSE_ALARM",
+  "gold_answer": 3,
+  "corrected_answer": "3 (auditor rewrite: 1)",
+  "reason": "Asks how many posts; one user is named Jay Stevens and has 3 posts in 2010, so gold 3 is correct; the auditor's COUNT(DISTINCT user) rewrite (1) is wrong.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many posts did Jay Stevens have in 2010?",
+  "corrected_sql": "SELECT (SELECT COUNT(*) FROM users WHERE DisplayName='Jay Stevens'), (SELECT COUNT(DISTINCT p.Id) FROM posts p JOIN users u ON u.Id=p.OwnerUserId WHERE u.DisplayName='Jay Stevens' AND STRFTIME('%Y', p.CreaionDate)='2010')",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1148,
+  "db_id": "european_football_2",
+  "verdict": "UNCLEAR",
+  "gold_answer": 40.65754640711444,
+  "corrected_answer": "51.16 any>70 / 34.43 latest / 29.96 avg (per player)",
+  "reason": "Asks for a percentage of players, but gold 40.66 is the share of Player_Attributes records; per player it is 51.16 (any rating > 70), 34.43 (latest), 29.96 (average). The evidence formula can be read at record level and the per-player rule is unspecified, so left UNCLEAR.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the percentage of players that are under 180 cm who have an overall strength of more than 70?",
+  "corrected_sql": "SELECT SUM(EXISTS(SELECT 1 FROM Player_Attributes a WHERE a.player_api_id=p.player_api_id AND a.overall_rating>70))*100.0/COUNT(*) FROM Player p WHERE p.height<180 AND EXISTS(SELECT 1 FROM Player_Attributes a WHERE a.player_api_id=p.player_api_id)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "different gold SQL: SELECT CAST(COUNT(CASE WHEN t2.overall_rating > 70 AND t1.height < 180 THEN t1.id ELSE NULL END) AS REAL) * 100 / COUNT(t1.id) percent FROM Player AS t1 INNER JOIN Player_Attributes AS t2 ON t1.player_api_id = t2.player_api_id"
+  }
+ },
+ {
+  "question_id": 1167,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 7.583333333333333,
+  "corrected_answer": "5.4167 (auditor rewrite: 0.8333)",
+  "reason": "Asks how many male patients were tested per month; gold counts lab tests (91 tests / 12 = 7.58); counting distinct patients in each month gives 65 / 12 = 5.42. Note the auditor's own rewrite (10 distinct patients / 12 = 0.83) is also wrong.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For the year that concluded on December 31, 1998, how many male patients on average were tested in the lab each month?",
+  "corrected_sql": "SELECT SUM(n)/12.0 FROM (SELECT STRFTIME('%m', T2.Date) mo, COUNT(DISTINCT T1.ID) n FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE STRFTIME('%Y', T2.Date)='1998' AND T1.SEX='M' GROUP BY mo)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1174,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 47.65217391304348,
+  "corrected_answer": 48.30769230769231,
+  "reason": "Average age of patients; gold averages over 46 lab rows from 26 patients: 47.652 vs 48.308.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the average age of patients as of year 1999 examined in the laboratory for the October of the year 1991?",
+  "corrected_sql": "SELECT AVG(1999 - STRFTIME('%Y', Birthday)), COUNT(*) FROM Patient WHERE ID IN (SELECT ID FROM Laboratory WHERE Date BETWEEN '1991-10-01' AND '1991-10-30')",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1203,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 641,
+  "corrected_answer": 88,
+  "reason": "Asks how many patients; gold counts lab rows: 641 vs 88.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many patients who were female got white blood cells that were below 3.5?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.WBC<3.5 AND T1.SEX='F'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1223,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": "True",
+  "corrected_answer": "False (7 male vs 7 female patients; 320 vs 41 lab rows)",
+  "reason": "Answer flips: counting lab rows males lead 320 vs 41 (True), counting patients it is 7 vs 7, so 'more male than female' is False.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Are there more male patients with creatinine not within the normal range than female? True or False?",
+  "corrected_sql": "SELECT COUNT(DISTINCT CASE WHEN T1.SEX='M' THEN T1.ID END), COUNT(DISTINCT CASE WHEN T1.SEX='F' THEN T1.ID END), SUM(T1.SEX='M'), SUM(T1.SEX='F') FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.CRE>=1.5",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1227,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 74.68535825545172,
+  "corrected_answer": 71.95,
+  "reason": "Average age of male patients; gold averages over 321 lab rows from 20 patients: 74.685 vs 71.95 (both use date('now'); values computed 2026-11-07).",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the average age of the male patient with high cholesterol?",
+  "corrected_sql": "SELECT AVG(STRFTIME('%Y', date('now')) - STRFTIME('%Y', Birthday)), COUNT(*) FROM Patient WHERE SEX='M' AND ID IN (SELECT ID FROM Laboratory WHERE `T-CHO`>=250)",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 1245,
+  "db_id": "thrombosis_prediction",
+  "verdict": "INTENDED",
+  "gold_answer": 51,
+  "corrected_answer": "51 (auditor rewrite: 12 patients)",
+  "reason": "Asks how many examinations (lab tests); the 51 joined rows are 51 distinct (ID, Date) lab records, so gold 51 is right; the auditor's 12 counts patients instead.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For the examinations done after 1997/1/1, how many of them have the result of an inactivated partial prothrom bin time?",
+  "corrected_sql": "SELECT COUNT(*), COUNT(DISTINCT T2.ID || '-' || T2.Date), COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.Date>'1997-01-01' AND T2.APTT>=45",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1252,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 4,
+  "corrected_answer": 1,
+  "reason": "Asks how many patients; gold counts lab x exam rows: 4 vs 1.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Among the patients with a normal Ig G level, how many of them have symptoms?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID JOIN Examination T3 ON T3.ID=T2.ID WHERE T2.IGG BETWEEN 900 AND 2000 AND T3.Symptoms IS NOT NULL",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 1255,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": "RA",
+  "corrected_answer": "SLE",
+  "reason": "Most common diagnosis among patients: counting patients SLE 9 vs RA 6 (SLE 10 with the evidence's inclusive bounds); gold's RA comes from counting lab rows (RA 36 rows vs SLE 29).",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For the patients with an abnormal Ig M level, what is the most common disease they are diagnosed with?",
+  "corrected_sql": "SELECT T1.Diagnosis, COUNT(DISTINCT T1.ID), COUNT(*) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.IGM NOT BETWEEN 40 AND 400 GROUP BY T1.Diagnosis ORDER BY 2 DESC LIMIT 6",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 1267,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 7,
+  "corrected_answer": 6,
+  "reason": "Asks how many patients; one patient (5440870) appears twice: 7 vs 6.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Among the patients with normal anti-SM, how many of them does not have thrombosis?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID), COUNT(*) FROM Examination T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.SM IN ('negative','0') AND T1.Thrombosis=0",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 1279,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 39.37153419593346,
+  "corrected_answer": 39.726027397260275,
+  "reason": "Percentage of patients; gold divides lab rows: 39.3715 vs 39.7260 (29 of 73 patients). Small, but a different answer.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "What is the percentage of patient who has a abnormal level of glutamic oxaloacetic transaminase level, yet he or she is diagnosed with SLE?",
+  "corrected_sql": "SELECT COUNT(DISTINCT CASE WHEN T1.Diagnosis LIKE '%SLE%' THEN T1.ID END)*100.0/COUNT(DISTINCT T1.ID), COUNT(DISTINCT CASE WHEN T1.Diagnosis LIKE '%SLE%' THEN T1.ID END), COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.GOT>=60",
+  "other_releases": {
+   "2024_dev": "different gold SQL: SELECT COUNT(CASE WHEN T1.Diagnosis LIKE '%SLE%' THEN T1.ID ELSE 0 END) / COUNT(T1.ID) FROM Patient AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE T2.`GOT` >= 60",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1280,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 1924,
+  "corrected_answer": 45,
+  "reason": "Asks how many male patients; gold 1,924 counts lab rows (the DB has only 202 male patients); distinct = 45.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many male patients have their glutamic oxaloacetic transaminase in the normal range?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID), (SELECT COUNT(*) FROM Patient WHERE SEX='M') FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.GOT<60 AND T1.SEX='M'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1291,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 1696,
+  "corrected_answer": 46,
+  "reason": "Asks how many male patients; gold counts lab rows: 1,696 vs 46.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many male patients have a normal level of both albumin and total protein?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T1.SEX='M' AND T2.ALB>3.5 AND T2.ALB<5.5 AND T2.TP BETWEEN 6.0 AND 8.5",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1295,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 4,
+  "corrected_answer": 1,
+  "reason": "Asks how many patients; gold counts lab x exam rows: 4 vs 1.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Among the patients whose total bilirubin is over the normal range, how many of them have a peripheral pattern observed in the sheet of ANA examination?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID JOIN Examination T3 ON T1.ID=T3.ID WHERE T2.`T-BIL`>=2 AND T3.`ANA Pattern` LIKE '%P%'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1297,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 14,
+  "corrected_answer": 2,
+  "reason": "Asks how many patients; gold counts lab x exam rows: 14 vs 2.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For the patients whose total cholesterol is higher than normal, how many of them have a negative measure of degree of coagulation?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID JOIN Examination T3 ON T1.ID=T3.ID WHERE T2.`T-CHO`>=250 AND T3.KCT='-'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1302,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 7,
+  "corrected_answer": 1,
+  "reason": "Asks how many patients; gold counts lab x exam rows: 7 vs 1.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "For the patients with a normal range of creatinine phosphokinase, how many of them have a positive measure of degree of coagulation?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID JOIN Examination T3 ON T1.ID=T3.ID WHERE T2.CPK<250 AND (T3.KCT='+' OR T3.RVVT='+' OR T3.LAC='+')",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "same gold SQL"
+  }
+ },
+ {
+  "question_id": 1305,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 3688,
+  "corrected_answer": 115,
+  "reason": "Asks how many patients; gold 3,688 counts lab rows (only 488 admitted patients exist); distinct = 115.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many patients accepted to the hospital have a normal level of white blood cells?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID), (SELECT COUNT(*) FROM Patient WHERE Admission='+') FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.WBC BETWEEN 3.5 AND 9 AND T1.Admission='+'",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1306,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 2044,
+  "corrected_answer": 54,
+  "reason": "Asks how many patients; gold 2,044 counts lab rows (only 195 SLE patients exist); distinct = 54.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "How many patients diagnosed with SLE have a normal white blood cell level?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID), (SELECT COUNT(*) FROM Patient WHERE Diagnosis='SLE') FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T1.Diagnosis='SLE' AND T2.WBC BETWEEN 3.5 AND 9",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 1308,
+  "db_id": "thrombosis_prediction",
+  "verdict": "TRUE_BUG",
+  "gold_answer": 10079,
+  "corrected_answer": 294,
+  "reason": "Asks how many patients; gold 10,079 counts lab rows (the DB has 1,238 patients); distinct = 294.",
+  "flagged_by": "v2 and v2_15s",
+  "in_v2_37": true,
+  "in_v2_15s_37": true,
+  "question": "Among the patients who have a normal platelet level, how many of them have other symptoms observed?",
+  "corrected_sql": "SELECT COUNT(DISTINCT T1.ID), (SELECT COUNT(*) FROM Patient) FROM Patient T1 JOIN Laboratory T2 ON T1.ID=T2.ID WHERE T2.PLT>100 AND T2.PLT<400 AND T1.Diagnosis IS NOT NULL",
+  "other_releases": {
+   "2024_dev": "same gold SQL",
+   "minidev": "question not present (same text)"
+  }
+ },
+ {
+  "question_id": 127,
+  "db_id": "financial",
+  "verdict": "FALSE_ALARM",
+  "gold_answer": "4167 rows (avg_client_age; first row 43.9)",
+  "corrected_answer": "identical to gold (4167 rows)",
+  "reason": "Timeout-dependent (flagged only by v2_15s). Clients repeat by #orders, uniformly within each account, so AVG(age) is unchanged: all 4,167 rows identical to a per-account AVG over distinct clients.",
+  "flagged_by": "v2_15s only",
+  "in_v2_37": false,
+  "in_v2_15s_37": true,
+  "question": "For accounts with monthly statement issuance, provide a comprehensive financial profile including client demographics, transaction activity, loan details, and rankings by transaction volume and cash flow performance.",
+  "corrected_sql": "WITH MonthlyAccounts AS ( SELECT account_id, district_id, date AS account_open_date FROM account WHERE frequency = 'POPLATEK MESICNE' ), AccountTransactions AS ( SELECT ma.account_id, COUNT(t.trans_id) AS transaction_count, SUM(CASE WHEN t.type = 'PRIJEM' THEN t.amount ELSE 0 END) AS total_income, SUM(CASE WHEN t.type = 'VYDAJ' THEN t.amount ELSE 0 END) AS total_expense, MAX(t.balance) AS max_balance, MIN(t.balance) AS min_balance FROM MonthlyAccounts ma LEFT JOIN trans t ON ma.account_id = t.account_id GROUP BY ma.account_id ), AccountLoans AS ( SELECT ma.account_id, COUNT(l.loan_id) AS loan_count, SUM(l.amount) AS total_loan_amount, AVG(l.duration) AS avg_loan_duration, SUM(CASE WHEN l.status = 'A' THEN 1 ELSE 0 END) AS active_loans, SUM(CASE WHEN l.status = 'B' THEN 1 ELSE 0 END) AS completed_loans FROM MonthlyAccounts ma LEFT JOIN loan l ON ma.account_id = l.account_id GROUP BY ma.account_id ) SELECT ma.account_id, d.A2 AS district_name, d.A3 AS region, ma.account_open_date, COUNT(DISTINCT c.client_id) AS client_count, ROUND((SELECT AVG(JULIANDAY('now') - JULIANDAY(c2.birth_date)) FROM disp d2 JOIN client c2 ON d2.client_id = c2.client_id WHERE d2.account_id = ma.account_id)/365.25, 1) AS avg_client_age, at.transaction_count, at.total_income, at.total_expense, at.total_income - at.total_expense AS net_cash_flow, at.max_balance, at.min_balance, al.loan_count, al.total_loan_amount, al.avg_loan_duration, al.active_loans, al.completed_loans, COUNT(DISTINCT o.order_id) AS order_count, COUNT(DISTINCT card.card_id) AS card_count, RANK() OVER (ORDER BY at.transaction_count DESC) AS transaction_rank, RANK() OVER (ORDER BY (at.total_income - at.total_expense) DESC) AS cash_flow_rank FROM MonthlyAccounts ma JOIN district d ON ma.district_id = d.district_id LEFT JOIN disp ON ma.account_id = disp.account_id LEFT JOIN client c ON disp.client_id = c.client_id LEFT JOIN AccountTransactions at ON ma.account_id = at.account_id LEFT JOIN AccountLoans al ON ma.account_id = al.account_id LEFT JOIN \"order\" o ON ma.account_id = o.account_id LEFT JOIN card ON disp.disp_id = card.disp_id GROUP BY ma.account_id, d.A2, d.A3, ma.account_open_date, at.transaction_count, at.total_income, at.total_expense, at.max_balance, at.min_balance, al.loan_count, al.total_loan_amount, al.avg_loan_duration, al.active_loans, al.completed_loans ORDER BY transaction_rank, cash_flow_rank;",
+  "other_releases": {
+   "2024_dev": "question not present (same text)",
+   "minidev": "question not present (same text)"
+  }
+ }
+]

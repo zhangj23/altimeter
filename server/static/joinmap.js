@@ -3,8 +3,10 @@
      container  element; emptied and filled with one <svg class="jm">
      schema     GET /api/schema?db_id=X  ({tables:[{name, rows, columns:[{name, type, pk, fk}]}]}) or null
      check      POST /api/check response (uses .sql, .findings[].fanout, .flagged) or null for a clean map
-     opts       {sql, width, animate=true, neighbours=true, maxNeighbours}
-   Returns {mode, width, height, tables, counted, repeating, factor, factorLabel, keys, edges}.
+     opts       {sql, width, animate=true, neighbours=true, maxNeighbours, focus=false}
+                focus: draw only the counted table, the repeating one and the JOIN path between them; the
+                other query tables collapse into one "+N tables" box (names listed in it and in its tooltip)
+   Returns {mode, width, height, tables, counted, repeating, factor, factorLabel, keys, edges, collapsed}.
    Layout is deterministic: the query's tables in FROM/JOIN order along the primary axis
    (x on wide containers, y on phones), FK neighbours in a second lane. No physics. */
 (function () {
@@ -75,6 +77,7 @@
     var G = narrow
       ? { bp: 62, gap: 26, fgap: 56, laneGap: 30, mS: 6, mP: 4, name: 13, sub: 11 }
       : { bp: 172, gap: 56, fgap: 56, laneGap: 52, mS: 8, mP: 6, name: 13, sub: 11 };
+    if (model.collapsed.length && !narrow) { G.bp = 144; G.gap = 40; }   // focus: tighter boxes, so the labels stay larger
     var bs;  // box size along the secondary axis
     if (narrow) {
       var lanes = model.lanes;
@@ -95,18 +98,23 @@
       keyW = Math.max(keyW, (String(model.finding.distinct_rows).length + String(model.finding.joined_rows).length + 14) * G.sub * SANS_PX);
     }
     var fgap = narrow ? Math.max(G.fgap, keyLines.length * 15 + 26) : Math.max(G.fgap, keyW + 32);
-    var pos = [], p = G.mP, i;
+    // a fan-out edge that skips a box detours over the row; its label then stacks above that detour line
+    var fanDetour = !narrow && model.fan && model.fan.from.lane === model.fan.to.lane && Math.abs(model.fan.da - model.fan.db) > 1;
+    if (fanDetour) mS0 = Math.max(mS0, G.mS + 18 + 6 + Math.max(keyLines.length * 15 + 4, 26));
+    var pos = [], p = G.mP, i, slotW = [];
     for (i = 0; i < model.slots; i++) {
+      // the "+N tables" box needs only its count and a few short names
+      slotW.push(model.collapsed.length && i === model.slots - 1 && !narrow ? 124 : G.bp);
       pos.push(p);
       var isF = model.fanSlot != null && (i === model.fanSlot);
-      p += G.bp + (i < model.slots - 1 ? (isF ? fgap : G.gap) : 0);
+      p += slotW[i] + (i < model.slots - 1 ? (isF ? fgap : G.gap) : 0);
     }
     var totalP = p + G.mP;
     var totalS = mS0 + model.lanes * bs + (model.lanes - 1) * G.laneGap + G.mS;
     model.boxes.forEach(function (b) {
-      b.p = pos[b.slot]; b.s = mS0 + b.lane * (bs + G.laneGap); b.bp = G.bp; b.bs = bs;
+      b.p = pos[b.slot]; b.s = mS0 + b.lane * (bs + G.laneGap); b.bp = b.lane ? G.bp : slotW[b.slot]; b.bs = bs;
     });
-    return { G: G, narrow: narrow, totalP: totalP, totalS: totalS, bs: bs, mS0: mS0, fgap: fgap };
+    return { G: G, narrow: narrow, totalP: totalP, totalS: totalS, bs: bs, mS0: mS0, fgap: fgap, fanDetour: fanDetour };
   }
 
   // orthogonal route between two boxes, in (p, s) coordinates
@@ -138,6 +146,37 @@
     return seq;
   }
 
+  // Shortest JOIN path from the counted table to the repeating one (BFS over the ON pairs), in path order.
+  // Without a repeating table or a path: the counted table and the tables joined to it directly.
+  function focusPath(main, joins, counted, repeating) {
+    var lc = function (t) { return String(t).toLowerCase(); };
+    var name = {}, adj = {};
+    main.forEach(function (t) { name[lc(t)] = t; adj[lc(t)] = []; });
+    joins.forEach(function (j) {
+      var a = lc(j.a), b = lc(j.b);
+      if (adj[a] && adj[b]) { adj[a].push(b); adj[b].push(a); }
+    });
+    var c = lc(counted), r = repeating ? lc(repeating) : null;
+    if (r && adj[c] && adj[r]) {
+      var prev = {}, q = [c], seen = {};
+      seen[c] = 1;
+      while (q.length) {
+        var u = q.shift();
+        if (u === r) break;
+        adj[u].forEach(function (v) { if (!seen[v]) { seen[v] = 1; prev[v] = u; q.push(v); } });
+      }
+      if (seen[r]) {
+        var path = [r];
+        while (path[0] !== c) path.unshift(prev[path[0]]);
+        return path.map(function (t) { return name[t]; });
+      }
+      return [counted, repeating];
+    }
+    var out = [counted];
+    (adj[c] || []).forEach(function (v) { if (out.indexOf(name[v]) < 0) out.push(name[v]); });
+    return out;
+  }
+
   // --- model: boxes, lanes, edges ------------------------------------------------------------------
   function buildModel(schema, check, opts) {
     var sql = opts.sql || (check && check.sql) || "";
@@ -151,6 +190,14 @@
 
     var main = parsed.tables.slice();
     [counted, repeating].forEach(function (t) { if (t && main.indexOf(t) < 0) main.push(t); });
+    var collapsed = [];
+    if (opts.focus && counted) {   // focus: the counted table, the repeating one, the JOIN path between them
+      var keep = focusPath(main, parsed.joins, counted, repeating);
+      if (keep.length < main.length) {
+        collapsed = main.filter(function (t) { return keep.indexOf(t) < 0; });
+        main = keep;
+      }
+    }
 
     var boxes = [], idx = {};
     function canon(name) { var t = byName[name.toLowerCase()]; return t ? t.name : name; }
@@ -199,6 +246,11 @@
         c.mains.forEach(function (m) { if (Math.abs(m.slot - best.slot) <= 2) nEdges.push({ from: b, to: m, kind: "fk" }); });
       });
     }
+    if (collapsed.length) {   // the tables left out, as one box at the end of the row
+      var mb = { id: " more", name: "+" + collapsed.length + (collapsed.length === 1 ? " table" : " tables"), rows: null,
+        lane: 0, slot: main.length, role: "", kind: "more", sub: collapsed.join(", "), all: collapsed };
+      boxes.push(mb);
+    }
     var lanes = 1;
     boxes.forEach(function (b) { lanes = Math.max(lanes, b.lane + 1); });
 
@@ -245,9 +297,26 @@
       C2.sub = f.distinct_rows != null ? f.distinct_rows.toLocaleString("en-US") + " rows read as " + f.joined_rows.toLocaleString("en-US") : "";
     }
     return {
-      boxes: boxes, main: main, lanes: lanes, slots: main.length, edges: nEdges.concat(edges), fan: fan,
+      boxes: boxes, main: main, lanes: lanes, slots: main.length + (collapsed.length ? 1 : 0), edges: nEdges.concat(edges), fan: fan, collapsed: collapsed,
       keys: keys, fanSlot: fanSlot, finding: f, counted: counted, repeating: repeating
     };
+  }
+
+  // Table names packed into at most maxLines lines of maxChars; what does not fit ends as "+N more".
+  function wrapNames(names, maxChars, maxLines) {
+    var lines = [], cur = "", i;
+    for (i = 0; i < names.length; i++) {
+      var nm = clip(names[i], maxChars), next = cur ? cur + ", " + nm : nm;
+      if (next.length <= maxChars) { cur = next; continue; }
+      if (lines.length + 1 >= maxLines) break;
+      lines.push(cur + ","); cur = nm;
+    }
+    if (i < names.length) {
+      var more = "+" + (names.length - i) + " more";
+      cur = (cur + ", " + more).length <= maxChars ? cur + ", " + more : more;
+    }
+    if (cur) lines.push(cur);
+    return lines.slice(0, maxLines);
   }
 
   // --- SVG --------------------------------------------------------------------------------------------
@@ -283,7 +352,7 @@
 
     container.innerHTML = "";
     var svg = el("svg", {
-      "class": "jm jm-" + mode + (opts.animate === false ? " jm-static" : ""),
+      "class": "jm jm-" + mode + (opts.animate === false ? " jm-static" : "") + (model.collapsed.length ? " jm-focus" : ""),
       viewBox: "0 0 " + vbW + " " + vbH, width: Math.round(vbW * scale), height: Math.round(vbH * scale),
       role: "img", "aria-label": model.counted
         ? "Join map: " + model.counted + " is counted " + factorLabel(model.finding.factor) + " through " + (model.repeating || "a join")
@@ -337,6 +406,12 @@
           svg.setAttribute("width", Math.round(vbW * scale));
           svg.setAttribute("height", Math.round(vbH * scale));
         }
+      } else if (L.fanDetour) {   // just above the detour line: the factor, then the keys beside it
+        var top0 = xy[1] - 6 - kh, x0 = xy[0] - (fw + 8 + kw) / 2;
+        el("rect", { x: x0, y: top0 + kh - 26, width: fw, height: 26, "class": "jm-knock" }, g);
+        text(g, x0 + fw - 6, top0 + kh - 6, lbl, "jm-factor", "end");
+        el("rect", { x: x0 + fw + 8, y: top0, width: kw, height: kh, "class": "jm-knock" }, g);
+        lines.forEach(function (l, k) { text(g, x0 + fw + 13, top0 + 12 + k * 15, l.t, l.cls); });
       } else {
         el("rect", { x: xy[0] - fw / 2, y: xy[1] - 32, width: fw, height: 26, "class": "jm-knock" }, g);
         text(g, xy[0], xy[1] - 11, lbl, "jm-factor", "middle");
@@ -361,6 +436,13 @@
       g.style.setProperty("--i", i);
       el("rect", { x: 0.5, y: 0.5, width: w - 1, height: h - 1, "class": "jm-rect" }, g);
       var maxName = Math.floor((w - 20) / (L.G.name * MONO_PX));
+      if (b.kind === "more") {   // the collapsed tables: their count, then their names as far as they fit
+        el("title", {}, g).textContent = b.all.join(", ");
+        text(g, 10, 20, b.name, "jm-name");
+        var lines = wrapNames(b.all, Math.floor((w - 20) / (L.G.sub * MONO_PX)), Math.max(1, Math.floor((h - 28) / 14)));
+        lines.forEach(function (ln, k) { text(g, 10, 37 + k * 14, ln, "jm-rows"); });
+        return;
+      }
       text(g, 10, 20, clip(b.name, maxName), "jm-name");
       var rows = fmtRows(b.rows);
       if (rows) text(g, 10, 37, rows, "jm-rows");
@@ -374,7 +456,7 @@
       tables: model.main.slice(), neighbours: model.boxes.filter(function (b) { return b.kind === "neighbour"; }).map(function (b) { return b.name; }),
       counted: model.counted, repeating: model.repeating,
       factor: fanInfo ? fanInfo.factor : null, factorLabel: fanInfo ? fanInfo.factorLabel : "", keys: fanInfo ? fanInfo.keys : "",
-      edges: model.edges.length + (model.fan ? 1 : 0), svg: svg
+      edges: model.edges.length + (model.fan ? 1 : 0), svg: svg, collapsed: model.collapsed.slice()
     };
   }
 

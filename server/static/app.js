@@ -24,7 +24,8 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
-const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+let quiet = false; // true while restoring this session's cards after a reload: no replayed motion
+const REDUCED = () => quiet || matchMedia("(prefers-reduced-motion: reduce)").matches;
 const smoothScroll = () => (REDUCED() ? "auto" : "smooth");
 
 /* ---------- motion primitives: they only ever move values the payload carries ---------- */
@@ -146,6 +147,18 @@ function arcPath(s0, s1, r) {
 }
 function bandOf(s) { return BANDS.find((b) => s < b.to) || BANDS[BANDS.length - 1]; }
 const clamp01 = (s) => Math.min(1, Math.max(0, s));
+// The figure everyone sees (readout, drum, Why, summary, announcements) and the band read from that same figure,
+// so 0.7996 never shows as "0.80 Caution".
+const fig = (nd) => clamp01(nd).toFixed(2);
+const bandAt = (nd) => bandOf(Number(fig(nd)));
+/* Distance from the shown figure to the nearest band edge: "0.03 below Cruise", "0.11 above Caution". */
+function edgeText(nd) {
+  const v = Number(fig(nd)), i = BANDS.indexOf(bandOf(v)), b = BANDS[i];
+  const up = i < BANDS.length - 1 ? b.to - v : Infinity, down = i > 0 ? v - b.from : Infinity;
+  if (up === Infinity && down === Infinity) return null;
+  if (down < 0.005) return `On the ${b.name} line`;
+  return up <= down ? `${up.toFixed(2)} below ${BANDS[i + 1].name}` : `${down.toFixed(2)} above ${BANDS[i - 1].name}`;
+}
 
 /* A round altimeter: SVG face plus an HTML drum counter in the window. Returns {root, set(score, mode)}. */
 function makeDial() {
@@ -212,8 +225,10 @@ function makeDial() {
   let onMove = null; // the clouds behind the dial follow the needle
   /* mode: "idle" (no reading), "hold" (awaiting probe: hollow needle parked at 0), or a score in 0..1 */
   let neutral = false; // uploaded data: no band colours, the clouds stay low
+  let onSettle = null;
   function set(score, mode) {
     stop();
+    delete root.dataset.band;
     if (mode === "hold") { root.className = "dial hold"; point(0); setDrum(null); lightTicks(null); if (onMove) onMove(null); return; }
     if (score == null || Number.isNaN(score)) { root.className = "dial idle"; point(0); setDrum(null); lightTicks(null); if (onMove) onMove(null); return; }
     const s = clamp01(score);
@@ -222,10 +237,22 @@ function makeDial() {
     drum.classList.remove("blank");
     // the sweep: a damped spring from 0; ticks light as the needle passes, the drum rolls with it
     const move = neutral ? null : onMove;
-    stop = spring(0, s, (x) => { point(x); lightTicks(x); rollDrum(Math.max(0, x)); if (move) move(x); },
-      () => { point(s); lightTicks(s); setDrum(s.toFixed(2)); if (move) move(s); });
+    // the scale ends at 1: an overshoot near the top rests on the stop instead of swinging into the window
+    // the band lands once the needle is within a hair of its figure (~0.4 s), not after the last of the spring's tail
+    let landed = false;
+    const land = () => {
+      if (landed) return;
+      landed = true;
+      if (!neutral) root.dataset.band = bandOf(Number(s.toFixed(2))).key; // the landed band's arc stays lit
+      if (onSettle) onSettle();
+    };
+    stop = spring(0, s, (x) => {
+      const c = Math.min(1, Math.max(0, x));
+      point(c); lightTicks(c); rollDrum(c); if (move) move(c);
+      if (Math.abs(x - s) < 0.015) land();
+    }, () => { point(s); lightTicks(s); setDrum(s.toFixed(2)); if (move) move(s); land(); });
   }
-  return { root, set, follow: (fn) => { onMove = fn; }, neutral: () => { neutral = true; } };
+  return { root, set, follow: (fn) => { onMove = fn; }, neutral: () => { neutral = true; }, settled: (fn) => { onSettle = fn; } };
 }
 
 /* ---------- status line and announcements ---------- */
@@ -267,6 +294,7 @@ function stopClock() { if (tick) clearInterval(tick); tick = null; }
 function syncAsk() {
   $("ask").disabled = !!pending || warming();
   $("ask").textContent = pending ? "In flight" : "Run test flight";
+  for (const b of $("runs").querySelectorAll(".suggest button")) b.disabled = $("ask").disabled; // a tap while warming would do nothing
 }
 
 /* ---------- runs (test flights), newest on top ---------- */
@@ -289,6 +317,7 @@ function renderSuggestions(dbs) {
     box.append(b);
   }
   $("runs").append(box);
+  syncAsk();
 }
 
 /* A run: header (question, database; one line with score and band once collapsed) and the instrument card,
@@ -335,6 +364,8 @@ function newRun(question, db_id) {
   dial.set(null, "hold");
   return {
     node: run, card, dial, read,
+    open() { if (run.classList.contains("collapsed")) toggle(); },
+    title(question, db) { q.replaceChildren(document.createTextNode(question), el("small", null, db)); },
     stage(text, time) { stageLine.textContent = text; clock.textContent = time; },
     summary(score, band) {
       sum.replaceChildren(el("span", null, score), el("small", null, band));
@@ -471,7 +502,13 @@ function collapsible(pre) {
   };
   box.addEventListener("click", (e) => { if (!getSelection().toString()) { e.stopPropagation(); toggle(); } });
   box.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
-  requestAnimationFrame(() => { if (pre.scrollHeight <= pre.clientHeight + 2) { box.classList.remove("clamped"); more.remove(); box.removeAttribute("role"); box.tabIndex = -1; } });
+  const fits = () => { box.classList.remove("clamped"); more.remove(); box.removeAttribute("role"); box.removeAttribute("aria-expanded"); box.tabIndex = -1; };
+  const measure = () => { if (!pre.clientHeight) return false; if (pre.scrollHeight <= pre.clientHeight + 2) fits(); return true; };
+  requestAnimationFrame(() => {
+    if (measure() || !window.ResizeObserver) return;
+    const ro = new ResizeObserver(() => { if (!box.isConnected || measure()) ro.disconnect(); });
+    ro.observe(box);
+  });
   return box;
 }
 
@@ -508,6 +545,8 @@ function renderReadings(r) {
         c.classList.toggle("chosen", c === card);
         c.classList.toggle("dropped", c !== card);
       }
+      r._chosen = rd.label;
+      saveSession();
       announce(`Reading ${rd.label} chosen.`);
     };
     card.addEventListener("click", choose);
@@ -649,22 +688,29 @@ function fillReply(card, r, secs) {
   const hasReadings = Array.isArray(r.readings) && r.readings.length >= 2;
   const read = card.read;
   read.replaceChildren();
+  let band = null;
   if (nd == null) {
     read.append(el("span", "bandname", "No probe"), el("b", null, "--"));
     card.summary("--", "No probe");
   } else if (r.calibrated === false) { // uploaded data: the bands were calibrated on BIRD dev only
-    read.append(el("span", "bandname uncal", r.calibration_note || "Needle not calibrated for this data"), el("b", null, clamp01(nd).toFixed(2)));
-    card.summary(clamp01(nd).toFixed(2), "Not calibrated");
+    read.append(el("span", "bandname uncal", r.calibration_note || "Needle not calibrated for this data"), el("b", null, fig(nd)));
+    card.summary(fig(nd), "Not calibrated");
   } else {
-    const b = bandOf(clamp01(nd));
-    const name = el("span", "bandname", b.name);
-    name.style.color = `var(--${b.key})`;
-    read.append(name, el("b", null, clamp01(nd).toFixed(2)));
-    card.summary(clamp01(nd).toFixed(2), b.name);
+    band = bandAt(nd);
+    const name = el("span", "bandname land", band.name);
+    name.style.color = `var(--${band.key})`;
+    read.append(name, el("b", null, fig(nd)));
+    const edge = edgeText(nd);
+    if (edge) read.append(el("span", "edge", edge));
+    card.summary(fig(nd), band.name);
+    // the band name lands when the needle settles; the figure is readable from the first frame
+    if (!REDUCED()) { card.dial.settled(() => read.classList.add("settled")); } else read.classList.add("settled");
   }
   const meta = el("span", "meta");
-  const took = secs != null ? `${secs} s` : fmtSeconds(r.gen_seconds);
-  meta.append(el("span", null, `Local · ${took} · 0 bytes sent`));
+  const took = secs != null ? `${secs} s` : fmtSeconds(r.timing && r.timing.worker_s != null ? r.timing.worker_s : r.gen_seconds);
+  const local = el("span");
+  local.append(el("i", null, `Local · ${took} ·`), " ", el("i", null, "0 bytes sent")); // narrow phones wrap between the two
+  meta.append(local);
   if (r.audit && r.audit.flagged) meta.append(el("span", null, `Double counting, ${fmtFactor(r.audit.findings[0].factor)}× rows`));
   if (r.fake) meta.append(el("span", null, "Fake worker"));
   if (r.mock) meta.append(el("span", null, "Mock fixture"));
@@ -692,7 +738,302 @@ function fillReply(card, r, secs) {
   if (body.children.length) parts.push(body);
   if (hasReadings) parts.push(renderReadings(r));
   if (r.audit && r.audit.flagged) parts.push(renderAudit(r.audit, r));
+  const acts = el("section", "acts");
+  // Ask band on a benchmark database: the question and schema (never rows) may go to the cloud, on a tap
+  if (band && band.key === "ask" && !isUpload(r.db_id) && r.question && !r.cloud) acts.append(towerButton(card, r));
+  acts.append(copyButton("Copy reading", () => readingText(r, card)));
+  parts.push(acts);
   parts.forEach((p, i) => { p.classList.add("in"); p.style.setProperty("--i", i + 1); card.card.append(p); }); // sections land in order
+  if (r.cloud) card.card.append(renderCloud(r.cloud));
+}
+
+/* ---------- copy reading: the card as plain text ---------- */
+function answerText(r) {
+  if (!r) return "No result";
+  if (r.error) return `Error: ${r.error}`;
+  if (!r.rows) return "No result";
+  if (!r.rows.length) return "No rows match";
+  if (r.rows.length === 1 && r.rows[0].length === 1) return `${fmtCell(r.rows[0][0])} (${(r.columns || [])[0] || ""})`;
+  return `${rowCount(r.rows.length, r.rows_capped, r.rows.length)}; first: ${r.rows[0].map(fmtCell).join(" | ")}`;
+}
+function readingText(r) {
+  const nd = needleOf(r);
+  const lines = [`Question: ${r.question || ""}`, `Database: ${dbLabel(r.db_id || "")}`, `SQL: ${(r.sql || "(none)").replace(/\s+/g, " ").trim()}`, `Answer: ${answerText(r)}`];
+  if (nd == null) lines.push("Needle: no probe");
+  else if (r.calibrated === false) lines.push(`Needle: ${fig(nd)} (not calibrated for uploaded data)`);
+  else lines.push(`Needle: ${fig(nd)}, ${bandAt(nd).name} (${edgeText(nd)})`);
+  if (r.audit && r.audit.flagged) {
+    const h = r.audit.headline;
+    lines.push(`Double counting: ${fmtFactor(r.audit.findings[0].factor)}x rows` + (h && r.audit.corrected ? `; ${h.before_text} as written, ${h.after_text} corrected` : ""));
+  }
+  if (Array.isArray(r.readings) && r.readings.length >= 2) {
+    for (const rd of r.readings) lines.push(`Reading ${rd.label}${rd.share != null ? ` (${Math.round(rd.share * 100)}% of samples)` : ""}: ${answerText(rd)}`);
+    if (r._chosen) lines.push(`Chosen: reading ${r._chosen}`);
+  }
+  lines.push("Local model, 0 bytes sent");
+  const c = r.cloud;
+  if (c) {
+    lines.push(`Cloud (${c.model || "Gemini"}${c.source === "cache" ? ", cached reply" : ""}, ${fmtInt(c.bytes_sent || 0)} bytes sent; no needle: cloud SQL)`);
+    lines.push(`Cloud SQL: ${(c.sql || "(none)").replace(/\s+/g, " ").trim()}`, `Cloud answer: ${c.error && !c.result ? `Error: ${c.error}` : answerText(c.result)}`);
+  }
+  return lines.join("\n");
+}
+
+/* ---------- radio the tower: Ask band, opt-in cloud escalation of schema + question (never rows) ---------- */
+function towerButton(card, r) {
+  const row = el("div", "fixrow tower-row");
+  const btn = el("button", "outline", "Radio the tower");
+  btn.type = "button";
+  btn.addEventListener("click", () => openTower(card, r, btn));
+  row.append(btn);
+  return row;
+}
+let tower = null; // {card, r, trigger, busy}
+/* The payload is Gemini's generateContent body. Its prompt text is shown as text (not as an escaped JSON
+   string), then the whole body as JSON. */
+function towerPayload(payload) {
+  const box = $("towerPay");
+  box.replaceChildren();
+  if (payload == null) return;
+  if (typeof payload === "string") { box.append(el("pre", "sql", payload)); return; }
+  const texts = [];
+  for (const c of Array.isArray(payload.contents) ? payload.contents : []) {
+    for (const part of (c && Array.isArray(c.parts) ? c.parts : [])) if (part && typeof part.text === "string") texts.push(part.text);
+  }
+  if (texts.length) {
+    texts.forEach((t) => box.append(el("p", "tk", "Prompt text"), el("pre", "sql", t)));
+    // the body around it, with the prompt (shown above) stood in for so 6 KB of DDL is not printed twice
+    const body = JSON.stringify(payload, (k, v) => (k === "text" && typeof v === "string" ? "(prompt text above)" : v), 1);
+    box.append(el("p", "tk", "Request body"), el("pre", "sql", body));
+    return;
+  }
+  for (const [k, v] of Object.entries(payload)) {
+    box.append(el("p", "tk", k), el("pre", "sql", typeof v === "string" ? v : JSON.stringify(v, null, 2)));
+  }
+}
+function towerState(st, text) {
+  const send = $("towerSend"), stay = $("towerStay"), err = $("towerErr");
+  err.hidden = st !== "error";
+  if (st === "error") err.textContent = text;
+  // nothing to show when the payload never came: no line promising "exactly this", no empty byte count
+  const blank = st === "error" && !$("towerPay").children.length;
+  for (const id of ["towerLine", "towerBytesLine", "towerPay"]) $(id).hidden = blank;
+  send.disabled = st !== "ready";
+  stay.disabled = st === "sending";
+  send.textContent = st === "sending" ? "Transmitting" : "Transmit";
+  if (tower) tower.busy = st === "sending";
+}
+async function openTower(card, r, trigger) {
+  if (tower) return;
+  tower = { card, r, trigger, busy: false };
+  const t = $("tower");
+  $("towerBytes").textContent = "--";
+  $("towerLine").textContent = "Transmit sends exactly this. No data rows.";
+  towerPayload(null);
+  towerState("loading");
+  t.hidden = false;
+  void t.offsetWidth;
+  t.classList.add("open");
+  document.documentElement.classList.add("locked");
+  $("towerStay").focus({ preventScroll: true });
+  const res = await apiCall("/api/escalate", { db_id: r.db_id, question: r.question, transmit: false }).catch(() => null);
+  if (!tower || tower.r !== r) return;
+  if (!res) { towerState("error", "No link to the laptop."); return; }
+  if (!res.ok) { towerState("error", res.status === 404 || res.status === 405 ? "Cloud escalation is not set up on this laptop." : (res.data && res.data.error) || `HTTP ${res.status}`); return; }
+  $("towerBytes").textContent = fmtInt(res.data.bytes);
+  $("towerLine").textContent = `Transmit sends exactly this to ${res.data.model || "Gemini"}. ${res.data.note || "No data rows."}`;
+  towerPayload(res.data.payload);
+  towerState("ready");
+}
+function closeTower() {
+  if (!tower || tower.busy) return;
+  const t = $("tower"), back = tower.trigger;
+  tower = null;
+  t.classList.remove("open");
+  document.documentElement.classList.remove("locked");
+  setTimeout(() => { if (!tower) t.hidden = true; }, REDUCED() ? 0 : 240);
+  if (back && back.isConnected) back.focus({ preventScroll: true });
+}
+async function transmit() {
+  if (!tower || tower.busy) return;
+  const { card, r } = tower;
+  towerState("sending");
+  const res = await apiCall("/api/escalate", { db_id: r.db_id, question: r.question, transmit: true }).catch(() => null);
+  if (!tower) return;
+  if (!res || !res.ok) { towerState("error", !res ? "No link to the laptop." : (res.data && res.data.error) || `HTTP ${res.status}`); $("towerSend").disabled = false; return; }
+  tower.busy = false;
+  r.cloud = { ...res.data, db_id: r.db_id };
+  closeTower();
+  const row = card.card.querySelector(".tower-row");
+  if (row) row.remove();
+  const sec = renderCloud(r.cloud);
+  sec.classList.add("in");
+  card.card.append(sec);
+  saveSession();
+  renderLog();
+  requestAnimationFrame(() => sec.scrollIntoView({ block: "start", behavior: smoothScroll() }));
+  announce(r.cloud.error && !r.cloud.result ? `Cloud answer failed: ${r.cloud.error}` : `Cloud answer: ${answerText(r.cloud.result)}. No needle for cloud SQL.`);
+}
+$("towerStay").addEventListener("click", closeTower);
+$("towerSend").addEventListener("click", transmit);
+$("tower").addEventListener("click", (e) => { if (e.target.classList.contains("scrim")) closeTower(); });
+$("tower").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeTower(); return; }
+  if (e.key !== "Tab") return; // keep focus inside the sheet
+  const f = [...$("tower").querySelectorAll("#towerPay, button:not(:disabled)")];
+  if (!f.length) return;
+  const i = f.indexOf(document.activeElement);
+  if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+  else if (!e.shiftKey && (i === f.length - 1 || i < 0)) { e.preventDefault(); f[0].focus(); }
+});
+
+/* The cloud's answer inside the run: its SQL, run on this laptop, with the double-counting audit. No needle. */
+function renderCloud(c) {
+  const sec = el("section", "cloud");
+  sec.append(el("h2", null, "Cloud answer"));
+  const meta = el("p", "cmeta");
+  meta.append(el("span", null, `${c.model || "Gemini"}${c.source === "cache" ? ", cached reply" : ""} · ${fmtInt(c.bytes_sent || 0)} bytes sent`),
+    el("span", null, "Ran on this laptop · No needle: cloud SQL"));
+  sec.append(meta);
+  const res = c.result || (c.error ? { error: c.error } : null);
+  sec.append(answerLine(res || {}));
+  if (res && !res.error && res.rows && res.rows.length && !(res.rows.length === 1 && res.rows[0].length === 1)) {
+    sec.append(resultTable(res.columns, res.rows, PREVIEW_ROWS));
+    if (res.rows.length > PREVIEW_ROWS) sec.append(el("p", "count", `Showing ${PREVIEW_ROWS} of ${fmtInt(res.rows.length)}`));
+  }
+  if (c.sql) {
+    const a = c.audit;
+    const box = collapsible(a && a.flagged ? hlBlock(c.sql, a.highlights) : sqlBlock(c.sql, null));
+    box.style.marginTop = "10px";
+    sec.append(box);
+    if (a && a.flagged) sec.append(renderAudit(a, { sql: c.sql, db_id: c.db_id }));
+    else if (a) sec.append(el("p", "note", `Double-counting check: ${auditFact(a)}`));
+  }
+  return sec;
+}
+
+/* ---------- this session: flights and checks, kept across a reload (sessionStorage, this tab only) ---------- */
+const SESSION_KEY = MOCK ? null : "altimeter.session";
+const KEEP_FLIGHTS = 12, KEEP_CHECKS = 8;
+const session = { seq: 0, flights: [], checks: [], shownCheck: null }; // flights {id, m, secs, card}; checks {id, d, preset}
+function saveSession() {
+  if (!SESSION_KEY) return;
+  const data = { seq: session.seq, flights: session.flights.map(({ id, m, secs }) => ({ id, m, secs })), checks: session.checks.map(({ id, d, preset }) => ({ id, d, preset })) };
+  for (let tries = 0; tries < 6; tries++) {
+    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(data)); return; } catch {
+      if (data.flights.length > 1) data.flights.shift(); else if (data.checks.length > 1) data.checks.shift(); else return; // over quota: drop the oldest
+    }
+  }
+}
+function addFlight(m, secs, card) {
+  session.flights.push({ id: ++session.seq, m, secs, card });
+  if (session.flights.length > KEEP_FLIGHTS) session.flights.shift();
+  saveSession();
+  renderLog();
+}
+function addCheck(d, preset) {
+  const id = ++session.seq;
+  session.checks.push({ id, d, preset });
+  if (session.checks.length > KEEP_CHECKS) session.checks.shift();
+  session.shownCheck = id;
+  saveSession();
+  renderLog();
+}
+function flightResult(m) {
+  const nd = needleOf(m);
+  const cloud = m.cloud ? " · Cloud" : "";
+  if (nd == null) return [(m.error ? "Query failed" : "No probe") + cloud, null];
+  if (m.calibrated === false) return [`${fig(nd)} not calibrated${cloud}`, null];
+  const b = bandAt(nd);
+  return [`${fig(nd)} ${b.name}${cloud}`, b.key];
+}
+function checkResult(d) {
+  const o = d.original || {};
+  if (o.error) return ["Does not run", "ask"];
+  if (d.flagged) return [`Double counting ${fmtFactor(d.findings[0].factor)}×`, "ask"];
+  if (!d.audited) return ["Nothing to check", null];
+  return d.audit_error ? ["Audit incomplete", null] : ["No double counting", "cruise"];
+}
+function renderLog() {
+  const box = $("log");
+  const entries = [...session.flights.map((f) => ({ ...f, kind: "flight" })), ...session.checks.map((c) => ({ ...c, kind: "check" }))].sort((a, b) => b.id - a.id);
+  box.hidden = !entries.length;
+  if (!entries.length) return;
+  const nf = session.flights.length, nc = session.checks.length;
+  const parts = [];
+  if (nf) parts.push(`${nf} ${nf === 1 ? "flight" : "flights"}`);
+  if (nc) parts.push(`${nc} ${nc === 1 ? "check" : "checks"}`);
+  box.querySelector("summary").textContent = `This session: ${parts.join(", ")}`;
+  const ol = box.querySelector("ol");
+  ol.replaceChildren(...entries.map((e) => {
+    const li = el("li");
+    const b = el("button");
+    b.type = "button";
+    let text, res, mono = false;
+    if (e.kind === "flight") { text = e.m.question || "Test flight"; res = flightResult(e.m); }
+    else {
+      const p = presets.find((x) => x.id === e.preset);
+      text = p ? p.question : e.d.sql.replace(/\s+/g, " ").trim();
+      mono = !p;
+      res = checkResult(e.d);
+    }
+    const r = el("span", "lr", res[0]);
+    if (res[1]) r.style.color = `var(--${res[1]})`;
+    b.append(el("span", "lk", e.kind === "flight" ? "Flight" : "Check"), el("span", "lq" + (mono ? " mono" : ""), text), r);
+    b.addEventListener("click", () => goTo(e));
+    li.append(b);
+    return li;
+  }));
+}
+function goTo(e) {
+  $("log").open = false;
+  if (e.kind === "flight") {
+    setMode("test");
+    const c = e.card;
+    if (!c || !c.node.isConnected) return;
+    c.open();
+    c.node.querySelector(".head").focus({ preventScroll: true });
+    requestAnimationFrame(() => c.node.scrollIntoView({ block: "start", behavior: smoothScroll() }));
+    return;
+  }
+  setMode("check");
+  showCheck(e, true);
+}
+function showCheck(e, scroll) {
+  const d = e.d;
+  if (![...$("checkDb").options].some((o) => o.value === d.db_id)) return false; // an upload that has since expired
+  $("checkDb").value = d.db_id;
+  showSchema("checkSchema", d.db_id);
+  $("sql").value = d.sql;
+  activePreset = e.preset || null;
+  renderPresets();
+  session.shownCheck = e.id;
+  renderCheck(d, scroll);
+  setCheckStatus("");
+  return true;
+}
+function restoreSession() {
+  if (!SESSION_KEY) return;
+  let data = null;
+  try { data = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch { data = null; }
+  if (!data || !Array.isArray(data.flights)) return;
+  session.seq = data.seq || 0;
+  session.checks = Array.isArray(data.checks) ? data.checks : [];
+  quiet = true;
+  try {
+    for (const f of data.flights) {
+      const card = newRun(f.m.question || "Test flight", dbLabel(f.m.db_id || ""));
+      fillReply(card, f.m, f.secs);
+      session.flights.push({ ...f, card });
+    }
+    for (const run of $("runs").querySelectorAll(".run.done")) { run.classList.add("collapsed"); run.querySelector(".head").setAttribute("aria-expanded", "false"); }
+  } catch { /* a stored entry from an older page version: show what restored */ } finally { quiet = false; }
+  renderLog();
+}
+// The newest check comes back once the database list (and so its select option) exists.
+function restoreCheck() {
+  const last = session.checks[session.checks.length - 1];
+  if (last && !$("checkOut").children.length && !$("sql").value.trim()) { quiet = true; try { showCheck(last, false); } catch { /* skip */ } finally { quiet = false; } }
 }
 
 /* ---------- socket ---------- */
@@ -750,15 +1091,17 @@ function onMessage(ev) {
     if (m.job_id != null) { lastJob = m.job_id; store.set("altimeter.lastJob", String(m.job_id)); }
     const secs = pending && pending.phase === "working" ? ((performance.now() - pending.t0) / 1000).toFixed(1) : null;
     const card = (pending && pending.card) || newRun(m.question || "Test flight", dbLabel(m.db_id || ""));
+    if (pending && !pending.question && m.question) card.title(m.question, dbLabel(m.db_id || "")); // picked up after a reload
     pending = null;
     stopClock();
     syncAsk();
     setStatus("");
     fillReply(card, m, secs);
+    addFlight(m, secs, card);
     const nd = needleOf(m);
     let say = nd == null ? "Answer ready. No probe score."
-      : m.calibrated === false ? `Score ${clamp01(nd).toFixed(2)}, not calibrated for uploaded data.`
-      : `Confidence ${nd.toFixed(2)}, ${bandOf(clamp01(nd)).name}.`;
+      : m.calibrated === false ? `Score ${fig(nd)}, not calibrated for uploaded data.`
+      : `Needle ${fig(nd)}, ${bandAt(nd).name}, ${edgeText(nd)}.`;
     if (isUpload(m.db_id) && uploader) uploader.refresh();
     if (m.error) say += " The query failed.";
     if (Array.isArray(m.readings) && m.readings.length >= 2) say += " Two readings, choose one.";
@@ -770,12 +1113,15 @@ function onMessage(ev) {
       store.set("altimeter.lastJob", String(m.job_id));
     }
     const card = pending && pending.card;
+    const expired = pending && isUpload(pending.db_id) && /unknown database|upload expired/i.test(m.message || "");
+    const message = expired ? "Your uploaded data expired. Upload it again on the Check a query tab." : m.message;
+    if (expired && uploader) uploader.refresh();
     pending = null;
     stopClock();
     syncAsk();
-    if (card) card.fail(m.message);
-    else setStatus(m.message, "", true);
-    announce(m.message);
+    if (card) card.fail(message);
+    else setStatus(message, "", true);
+    announce(message);
   }
 }
 
@@ -795,6 +1141,9 @@ function connect() {
   sock.onopen = () => {
     retryMs = 500;
     setLink(true);
+    if ($("status").classList.contains("err")) setStatus(""); // "No link" or a failed list load is stale now
+    if (!$("db").options.length) loadDbs(); // the page loaded while the laptop was unreachable
+    if (!presets.length) loadPresets();
     sock.send(JSON.stringify({ type: "hello", client: CLIENT, last_job: lastJob }));
   };
   sock.onmessage = onMessage;
@@ -900,24 +1249,25 @@ function ledger(h, fo) {
   const timers = [];
   const at = (ms, fn) => (anim ? timers.push(setTimeout(fn, ms)) : fn());
   // schedule (ms after attach)
-  const stag = fan ? Math.min(60, 700 / fan.n) : 0;
-  const fanEnd = fan ? 200 + (fan.n - 1) * stag + 300 : 0;
+  // compressed so the corrected figure is on screen by ~0.8 s and the strike lands by ~1.4 s
+  const stag = fan ? Math.min(40, 360 / fan.n) : 0;
+  const fanEnd = fan ? 120 + (fan.n - 1) * stag + 220 : 0;
   const T = fan
-    ? { climb: 200, climbMs: Math.max(400, fanEnd - 200), collapse: fanEnd + 250, down: fanEnd + 250, once: fanEnd + 730, strike: fanEnd + 900, times: fanEnd + 1150 }
-    : { climb: 100, climbMs: 500, collapse: 0, down: 700, once: 0, strike: 1250, times: 1500 };
+    ? { climb: 120, climbMs: Math.max(300, fanEnd - 120), collapse: fanEnd + 120, down: fanEnd + 120, once: fanEnd + 520, strike: fanEnd + 600, times: fanEnd + 800 }
+    : { climb: 80, climbMs: 380, collapse: 0, down: 500, once: 0, strike: 950, times: 1150 };
   if (anim && nb) wasFig.textContent = nb.fmt(0);
   if (anim && nb && na) nowFig.textContent = nb.fmt(nb.v);
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (fan) {
       fan.measure();
-      fan.cells.forEach((c, i) => at(200 + i * stag, () => c.classList.add("on")));
+      fan.cells.forEach((c, i) => at(120 + i * stag, () => c.classList.add("on")));
       at(T.collapse, () => fan.node.classList.add("collapse"));
       at(T.once, () => { fan.node.classList.remove("collapse"); fan.node.classList.add("once"); });
     }
     if (anim && nb) at(T.climb, () => { wasFig.classList.add("live"); tween(0, nb.v, T.climbMs, (x) => { wasFig.textContent = nb.fmt(x); }, () => { wasFig.classList.remove("live"); wasFig.textContent = h.before_text; }); });
     at(T.down, () => {
       box.classList.add("entered");
-      if (anim && nb && na) { nowFig.classList.add("live"); tween(nb.v, na.v, 560, (x) => { nowFig.textContent = na.fmt(x); }, () => { nowFig.classList.remove("live"); nowFig.textContent = h.after_text; }); }
+      if (anim && nb && na) { nowFig.classList.add("live"); tween(nb.v, na.v, 480, (x) => { nowFig.textContent = na.fmt(x); }, () => { nowFig.classList.remove("live"); nowFig.textContent = h.after_text; }); }
     });
     at(T.strike, () => box.classList.add("struck"));
     at(T.times, () => box.classList.add("rated"));
@@ -937,11 +1287,39 @@ function rewriteBlock(c) {
   return det;
 }
 
-/* Copy the corrected SQL. Plain http on the router has no async clipboard, so fall back to execCommand,
-   and if that fails too, open the rewrite and select its SQL for the phone's own Copy menu. */
-function copyFixButton(c, det) {
+/* Copy text. Plain http on the router has no async clipboard, so fall back to execCommand. Resolves true/false. */
+function copyText(text) {
+  const legacy = () => {
+    const ta = el("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    ta.style.fontSize = "16px"; // iOS zooms into a focused field under 16px
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  };
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(() => true, () => legacy());
+  return Promise.resolve(legacy());
+}
+function selectNode(node) {
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  node.scrollIntoView({ block: "nearest" });
+}
+/* An outline button that copies getText(); when no copy path works, onFail(row) selects the text for the
+   phone's own Copy menu and returns true (false: nothing to select). */
+function copyButton(label, getText, onFail) {
   const row = el("div", "fixrow");
-  const btn = el("button", "copy outline", "Copy corrected SQL");
+  const btn = el("button", "copy outline", label);
   btn.type = "button";
   const said = el("span", "copied");
   said.setAttribute("aria-live", "polite");
@@ -953,40 +1331,30 @@ function copyFixButton(c, det) {
     clearTimeout(btn._t);
     btn._t = setTimeout(() => { said.textContent = ""; said.classList.remove("on"); }, 2500);
   };
-  const selectIt = () => {
-    let pre;
-    if (det && det.isConnected) { det.open = true; pre = det.querySelector("pre"); }
-    else pre = (row.closest(".sheet, .audit") || document).querySelector(".sd-after .sd-code");
-    if (!pre) { done("Copy failed."); return; }
-    const range = document.createRange();
-    range.selectNodeContents(pre);
-    const sel = getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    pre.scrollIntoView({ block: "nearest" });
-    done("Selected. Use your Copy menu.");
-  };
-  const legacy = () => {
-    const ta = el("textarea");
-    ta.value = c.sql;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.append(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch { ok = false; }
-    ta.remove();
-    return ok;
-  };
+  const fallback = onFail || ((r) => {
+    let pre = r.nextElementSibling;
+    if (!pre || !pre.classList.contains("copytext")) { pre = el("pre", "sql copytext"); r.after(pre); }
+    pre.textContent = getText();
+    selectNode(pre);
+    return true;
+  });
   btn.addEventListener("click", () => {
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(c.sql).then(() => done("Copied"), () => (legacy() ? done("Copied") : selectIt()));
-    } else if (legacy()) done("Copied");
-    else selectIt();
+    copyText(getText()).then((ok) => done(ok ? "Copied" : fallback(row) ? "Selected. Use your Copy menu." : "Copy failed."));
   });
   row.append(btn, said);
   return row;
+}
+
+/* Copy the corrected SQL; if the clipboard is out of reach, open the rewrite (or the diff) and select its SQL. */
+function copyFixButton(c, det) {
+  return copyButton("Copy corrected SQL", () => c.sql, (row) => {
+    let pre;
+    if (det && det.isConnected) { det.open = true; pre = det.querySelector("pre"); }
+    else pre = (row.closest(".sheet, .audit") || document).querySelector(".sd-after .sd-code");
+    if (!pre) return false;
+    selectNode(pre);
+    return true;
+  });
 }
 
 // The SQL diff shows the corrected query in full, so the rewrite disclosure and the highlighted copy are left out.
@@ -1018,7 +1386,16 @@ function mapAndDiff(db_id, check) {
     w = cw;
     JoinMap.render(box, schema, check, { sql: check.sql, width: cw, animate });
   };
-  if (window.JoinMap) fetchSchema(db_id).then((s) => { schema = s; maps.add(entry); requestAnimationFrame(() => entry.draw(true)); });
+  if (window.JoinMap) fetchSchema(db_id).then((s) => {
+    schema = s;
+    maps.add(entry);
+    requestAnimationFrame(() => {
+      entry.draw(true);
+      if (w || !window.ResizeObserver) return;
+      const ro = new ResizeObserver(() => { if (!box.isConnected) { ro.disconnect(); return; } if (box.clientWidth) { ro.disconnect(); entry.draw(true); } });
+      ro.observe(box);
+    });
+  });
   const c = check.corrected;
   if (window.SqlDiff && c && c.sql) {
     const d = el("div", "diffbox");
@@ -1053,7 +1430,7 @@ function checklist(items) {
   return ol;
 }
 
-function renderCheck(d) {
+function renderCheck(d, scroll = true) {
   const o = d.original || {};
   const sheet = el("article", "sheet");
   let kind, title, sub;
@@ -1125,7 +1502,7 @@ function renderCheck(d) {
   }
   if (body.children.length) sheet.append(body);
   $("checkOut").replaceChildren(sheet);
-  requestAnimationFrame(() => sheet.scrollIntoView({ block: "start", behavior: smoothScroll() }));
+  if (scroll) requestAnimationFrame(() => sheet.scrollIntoView({ block: "start", behavior: smoothScroll() }));
 }
 
 function renderPresets() {
@@ -1159,6 +1536,7 @@ async function loadPresets() {
     const r = await apiCall("/api/presets");
     presets = r.data.presets || [];
     renderPresets();
+    renderLog(); // checks of a preset are listed by its question
   } catch { presets = []; renderPresets(); }
 }
 
@@ -1189,14 +1567,21 @@ async function runCheck(e) {
   const body = { db_id, sql };
   if (p && p.db_id === db_id) body.preset = p.id;
   checkBusy(true);
-  const t0 = performance.now();
+  $("sql").blur(); // drop the phone keyboard so the verdict has the screen
   try {
     const r = await apiCall("/api/check", body);
     checkBusy(false);
     if (isUpload(db_id) && uploader) uploader.refresh(); // the server TTL restarts on every use
-    if (!r.ok) { setCheckStatus(r.data.error || `Check failed (HTTP ${r.status}).`); $("checkOut").replaceChildren(); return; }
-    setCheckStatus("Checked", `${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    if ($("sql").value.trim() !== sql || $("checkDb").value !== db_id) { setCheckStatus(""); return; } // a preset or the database changed meanwhile
+    if (!r.ok) {
+      const gone = isUpload(db_id) && /unknown database|upload/i.test((r.data && r.data.error) || "");
+      setCheckStatus(gone ? "Your uploaded data expired. Upload it again." : (r.data && r.data.error) || `Check failed (HTTP ${r.status}).`);
+      $("checkOut").replaceChildren();
+      return;
+    }
+    setCheckStatus(""); // the sheet carries the verdict and its own check time
     renderCheck(r.data);
+    addCheck(r.data, body.preset || null);
     const d = r.data;
     announce(d.flagged ? `Double counting. ${d.explanation}` + (d.headline ? ` ${d.headline.before_text} becomes ${d.headline.after_text}.` : "")
       : d.original && d.original.error ? "The query does not run." : "No double counting found.");
@@ -1206,19 +1591,35 @@ async function runCheck(e) {
   }
 }
 
-function setMode(mode) {
+/* push: a tap on a tab adds a history entry, so the phone's Back button returns to the previous tab
+   instead of leaving the page. */
+function setMode(mode, push) {
   const test = mode === "test";
   const was = document.body.classList.contains("test");
   document.body.classList.toggle("moved", was !== test); // only a change of tab slides the panel in
   document.body.classList.toggle("test", test);
   $("tabTest").setAttribute("aria-selected", String(test));
   $("tabCheck").setAttribute("aria-selected", String(!test));
-  history.replaceState(null, "", location.pathname + location.search + (test ? "#test" : ""));
+  $("tabTest").tabIndex = test ? 0 : -1;
+  $("tabCheck").tabIndex = test ? -1 : 0;
+  const url = location.pathname + location.search + (test ? "#test" : "");
+  if (push && was !== test) history.pushState(null, "", url);
+  else history.replaceState(null, "", url);
 }
 
-$("tabTest").addEventListener("click", () => setMode("test"));
-$("tabCheck").addEventListener("click", () => setMode("check"));
+$("tabTest").addEventListener("click", () => setMode("test", true));
+$("tabCheck").addEventListener("click", () => setMode("check", true));
+addEventListener("popstate", () => setMode(location.hash === "#test" ? "test" : "check"));
+// tablist keys: Left/Right/Home/End move between the two tabs
+$("tabCheck").parentElement.addEventListener("keydown", (e) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+  e.preventDefault();
+  const toTest = e.key === "End" || (e.key !== "Home" && !document.body.classList.contains("test"));
+  setMode(toTest ? "test" : "check", true);
+  $(toTest ? "tabTest" : "tabCheck").focus();
+});
 $("checkForm").addEventListener("submit", runCheck);
+$("sql").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("checkForm").requestSubmit(); } });
 $("sql").addEventListener("input", () => {
   const p = presets.find((x) => x.id === activePreset);
   if (p && normSql($("sql").value) !== normSql(p.sql)) { activePreset = null; renderPresets(); }
@@ -1289,6 +1690,7 @@ function fillDbs(dbs) {
   syncUploadOption();
   showSchema("checkSchema", $("checkDb").value);
   showSchema("testSchema", sel.value);
+  restoreCheck();
 }
 
 async function loadDbs() {
@@ -1305,7 +1707,8 @@ function submit(e) {
   const question = $("question").value.trim();
   const db_id = $("db").value;
   if (!question || !db_id || pending || warming()) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop yet.", "", true); connect(); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop. Reconnecting; ask again in a moment.", "", true); retryMs = 500; connect(); return; }
+  $("question").blur(); // drop the phone keyboard so the dial is in view
   store.set("altimeter.db", db_id);
   pending = { question, db_id, t0: performance.now(), phase: "sent", card: newRun(question, dbLabel(db_id)) };
   syncAsk();
@@ -1376,8 +1779,10 @@ if (window.Upload) {
 
 $("flight").addEventListener("submit", submit);
 $("question").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("flight").requestSubmit(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("flight").requestSubmit(); }
 });
+// back/forward cache: the socket was closed while the page sat in the cache
+addEventListener("pageshow", (e) => { if (e.persisted) { retryMs = 500; connect(); } });
 
 setMode(location.hash === "#test" ? "test" : "check");
 if (MOCK) {
@@ -1385,6 +1790,7 @@ if (MOCK) {
   s.src = "mock.js";
   document.body.append(s);
 } else {
+  restoreSession();
   loadDbs();
   loadPresets();
   connect();

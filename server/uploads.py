@@ -24,12 +24,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from altimeter import sqlexec  # noqa: F401 - importing it sets SQLite's process-wide heap limit
+
 PREFIX = "upload:"
 MAX_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 200_000
 MAX_COLS = 50
 MAX_CSV_FILES = 8
 INFER_ROWS = 1000
+SNIFF_CHARS = 8192
 TTL_S = 15 * 60
 MAX_LIVE = 8
 SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -113,6 +116,11 @@ _REAL = re.compile(r"^[+-]?((0|[1-9][0-9]*)(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+
 
 
 def _decode(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):  # Excel "Unicode text" / UTF-16 exports
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -135,14 +143,19 @@ def parse_csv(filename: str, data: bytes) -> tuple[list[str], list[str], list[li
     text = _decode(data)
     if not text.strip():
         raise UploadError(f"{filename}: the file is empty")
-    sample = text[:65536]
+    sample = text[:SNIFF_CHARS]  # csv.Sniffer is quadratic (and holds the GIL): 24 KB of ",'a" took 1.9 s
     try:
         dialect: Any = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
     reader = csv.reader(io.StringIO(text, newline=""), dialect)
+    rows: list[list[str]] = []
     try:
-        rows = [r for r in reader if any(c.strip() for c in r)]
+        for r in reader:
+            if any(c.strip() for c in r):
+                rows.append(r)
+                if len(rows) > MAX_ROWS + 1:  # stop early: a 10 MB file of tiny rows is millions of lists
+                    raise UploadError(f"{filename}: more than {MAX_ROWS:,} rows; the limit is {MAX_ROWS:,}")
     except csv.Error as e:
         raise UploadError(f"{filename}: not a readable CSV ({e})") from None
     if not rows:
@@ -246,12 +259,25 @@ def _clean_sqlite(con: sqlite3.Connection) -> None:
     if not tables:
         raise UploadError("the database has no tables")
     for t in tables:
-        ncols = len(con.execute(f"PRAGMA table_info({_qi(t)})").fetchall())
+        xinfo = con.execute(f"PRAGMA table_xinfo({_qi(t)})").fetchall()
+        if any(c[6] in (2, 3) for c in xinfo):  # computed on read: an expression could build huge values
+            raise UploadError(f"table {t}: generated columns are not supported")
+        ncols = len(xinfo)
         if ncols > MAX_COLS:
             raise UploadError(f"table {t}: {ncols} columns; the limit is {MAX_COLS}")
         n = con.execute(f"SELECT COUNT(*) FROM {_qi(t)}").fetchone()[0]
         if n > MAX_ROWS:
             raise UploadError(f"table {t}: {n:,} rows; the limit is {MAX_ROWS:,}")
+
+
+def _check_schema_size(uid: str) -> None:
+    """Refuse an upload whose prompt schema the local model could not take (see prompting.MAX_SCHEMA_CHARS)."""
+    from altimeter.prompting import MAX_SCHEMA_CHARS, schema_text
+
+    n = len(schema_text(db_path(PREFIX + uid)))
+    if n > MAX_SCHEMA_CHARS:
+        raise UploadError(f"the schema is too large for the local model ({n:,} characters with sample values; "
+                          f"the limit is {MAX_SCHEMA_CHARS:,}); upload fewer or narrower tables")
 
 
 def _table_names(con: sqlite3.Connection) -> list[str]:
@@ -322,6 +348,11 @@ class Store:
             con, kind = load_csvs(files, uid), "csv"
         else:
             raise UploadError("upload one .sqlite/.db file, or 1-8 .csv files")
+        try:
+            _check_schema_size(uid)
+        except BaseException:
+            con.close()
+            raise
         self.sweep()
         now = time.monotonic()
         with self._lock:

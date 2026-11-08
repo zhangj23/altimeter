@@ -54,3 +54,7 @@
 }
 .jm.jm-static .jm-box, .jm.jm-static .jm-edges, .jm.jm-static .jm-label { animation: none; opacity: 1; }
 .jm.jm-static .jm-edge-fanout { animation: none; stroke-dashoffset: 0 !important; }
+/* focus mode: the query tables off the join path, collapsed into one box */
+.jm .jm-more .jm-rect { fill: none; stroke: var(--jm-rule); stroke-dasharray: 3 3; }
+.jm .jm-more .jm-name { font: 500 13px/1 "Poppins", system-ui, sans-serif; fill: var(--jm-ink-2); }
+.jm .jm-more .jm-rows { font: 400 11px/1 var(--jm-mono); fill: var(--jm-ink-2); }

@@ -27,10 +27,12 @@
   const rowsText = (n) => Number(n).toLocaleString("en-US") + (n === 1 ? " row" : " rows");
   const reducedMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  // server messages are lower-case fragments ("not a SQLite database (bad header)"): show them as sentences
+  const sentence = (t) => { t = t.trim(); t = t.charAt(0).toUpperCase() + t.slice(1); return /[.!?)]$/.test(t) ? t : t + "."; };
   function errorText(xhrOrRes, body) {
-    if (body && typeof body.error === "string" && body.error) return body.error;  // server: 400 {error}
-    if (body && typeof body.detail === "string" && body.detail) return body.detail;
-    if (body && Array.isArray(body.detail) && body.detail[0] && body.detail[0].msg) return body.detail[0].msg;
+    if (body && typeof body.error === "string" && body.error) return sentence(body.error);  // server: 400 {error}
+    if (body && typeof body.detail === "string" && body.detail) return sentence(body.detail);
+    if (body && Array.isArray(body.detail) && body.detail[0] && body.detail[0].msg) return sentence(body.detail[0].msg);
     const status = xhrOrRes && xhrOrRes.status;
     if (status === 413) return "Too large. The limit is 10 MB.";
     return status ? "Upload failed (HTTP " + status + ")." : "Upload failed: the laptop did not respond.";

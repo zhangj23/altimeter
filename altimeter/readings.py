@@ -30,7 +30,10 @@ def _cell(v: Any) -> Any:
 
 def _columns(db_path: str, sql: str) -> list[str] | None:
     """Column names without scanning: wrap with LIMIT 0."""
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        con = sqlexec.connect_guarded(db_path)  # same authorizer as the query itself
+    except sqlite3.Error:
+        return None
     deadline = time.time() + 1.0
     con.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10_000)
     try:

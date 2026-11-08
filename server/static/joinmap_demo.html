@@ -41,9 +41,10 @@ pre { font: 400 12px/1.45 var(--mono); color: var(--ink-2); background: var(--pa
 <script src="joinmap.js"></script>
 <script>
 (function () {
-  var CASES = ["club_budget", "bird197", "bank_region_loans", "bird89"];
+  var CASES = ["club_budget", "bird197", "bank_region_loans", "bird89", "bird140"];
   var qs = new URLSearchParams(location.search);
   var only = qs.get("case"), width = qs.get("w") ? parseInt(qs.get("w"), 10) : null;
+  var focus = qs.get("focus") === "1"; // ?focus=1: counted table, repeating table and the path between them
   var root = document.getElementById("root");
   window.__jm = {};
 
@@ -69,7 +70,7 @@ pre { font: 400 12px/1.45 var(--mono); color: var(--ink-2); background: var(--pa
       var card = document.createElement("div"); card.className = "card " + cls;
       if (w) card.style.width = w + "px";
       pair.appendChild(card);
-      var r = JoinMap.render(card, schema, check, {});
+      var r = JoinMap.render(card, schema, check, { focus: focus });
       delete r.svg;
       out[cls] = r;
       return r;
@@ -91,7 +92,7 @@ pre { font: 400 12px/1.45 var(--mono); color: var(--ink-2); background: var(--pa
   getJSON("/api/presets").then(function (res) {
     var by = {}; res.presets.forEach(function (p) { by[p.id] = p; });
     var ids = only ? [only] : CASES;
-    if (!only) { var h1 = document.createElement("h1"); h1.textContent = "Join map, four pre-flight checks at phone and table widths"; root.appendChild(h1); }
+    if (!only) { var h1 = document.createElement("h1"); h1.textContent = "Join map, five pre-flight checks at phone and table widths"; root.appendChild(h1); }
     return ids.reduce(function (chain, id) {
       return chain.then(function () {
         var p = by[id];

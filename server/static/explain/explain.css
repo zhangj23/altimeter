@@ -1,0 +1,24 @@
+@font-face { font-family: "Poppins"; font-weight: 400; font-style: normal; font-display: block; src: url(../fonts/poppins-400.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 500; font-style: normal; font-display: block; src: url(../fonts/poppins-500.woff2) format("woff2"); }
+@font-face { font-family: "Poppins"; font-weight: 600; font-style: normal; font-display: block; src: url(../fonts/poppins-600.woff2) format("woff2"); }
+
+:root { /* same instrument-panel tokens as table.html */
+  --panel: #171a1f;
+  --panel-2: #1f232a;
+  --panel-3: #282d35;
+  --face: #0f1114;
+  --bezel: #3a414b;
+  --ink: #e8e6e0;
+  --ink-2: #9ca1a8;
+  --ink-3: #6b7078;
+  --rule: #343a43;
+  --ask: #cf5c4f;
+  --caution: #d6a63e;
+  --cruise: #5fae76;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--panel); overflow: hidden; }
+body { cursor: pointer; }
+#stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; background: var(--panel); overflow: hidden; }
+#stage svg { display: block; width: 1920px; height: 1080px; font-family: "Poppins", sans-serif; font-variant-numeric: tabular-nums; }
+#stage svg .mono { font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace; }

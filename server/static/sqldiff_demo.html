@@ -25,8 +25,9 @@ p.err { margin: 0; font-size: 14px; color: #cf5c4f; }
 /* Renders the auditor's correction for three presets: POST /api/check -> response.sql (as written) and
    response.corrected.sql (auditor rewrite or the preset's hand fix). ?p=<preset id> shows one preset. */
 (async () => {
-  const ids = ["club_budget", "bird197", "bird571"];
+  const ids = ["club_budget", "bird197", "bird571", "bird140"];
   const only = new URLSearchParams(location.search).get("p");
+  const compact = new URLSearchParams(location.search).get("compact"); // ?compact=2: changed lines with 2 lines of context
   const main = document.getElementById("cases");
   const add = (tag, cls, text, parent) => {
     const e = document.createElement(tag);
@@ -59,7 +60,7 @@ p.err { margin: 0; font-size: 14px; color: #cf5c4f; }
       const out = await r.json();
       if (!r.ok) throw new Error(out.error || r.status);
       if (!out.corrected || !out.corrected.sql) { add("p", "err", "No correction returned: " + (out.message || ""), box); continue; }
-      SqlDiff.render(box, out.sql, out.corrected.sql);
+      SqlDiff.render(box, out.sql, out.corrected.sql, { compact: compact == null ? null : Number(compact) });
     } catch (e) {
       add("p", "err", "Check failed: " + e.message, box);
     }

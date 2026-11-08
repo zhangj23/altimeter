@@ -31,6 +31,13 @@ In your answer, please enclose the generated SQL query in a code block:
 
 N_SAMPLE_VALUES = 3
 MAX_VALUE_CHARS = 40
+# Largest BIRD dev schema (european_football_2) renders to ~19.3k chars (~6.9k tokens). Longer schemas (wide
+# uploads) are refused before generation: they would OOM or time out the 6 GB GPU and force a worker restart.
+MAX_SCHEMA_CHARS = 24_000
+
+
+def _qi(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
 
 
 @lru_cache(maxsize=64)
@@ -44,12 +51,13 @@ def schema_text(db_path: str) -> str:
         ).fetchall()
         for name, ddl in tables:
             out.append((ddl or "").strip() + ";")
-            for col in [r[1] for r in con.execute(f'PRAGMA table_info("{name}")')]:
+            for col in [r[1] for r in con.execute(f"PRAGMA table_info({_qi(name)})")]:
                 try:
                     vals = [
                         str(r[0])[:MAX_VALUE_CHARS]
                         for r in con.execute(
-                            f'SELECT DISTINCT "{col}" FROM "{name}" WHERE "{col}" IS NOT NULL LIMIT {N_SAMPLE_VALUES}'
+                            f"SELECT DISTINCT {_qi(col)} FROM {_qi(name)} WHERE {_qi(col)} IS NOT NULL "
+                            f"LIMIT {N_SAMPLE_VALUES}"
                         )
                     ]
                 except sqlite3.Error:

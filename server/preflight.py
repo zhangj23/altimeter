@@ -1,6 +1,6 @@
 """Pre-flight check: run the deterministic fan-out auditor on any SQL (a colleague's, or the model's).
 
-POST /api/check {db_id, sql, preset?} -> audit + original result + corrected result (auditor rewrite, or a
+POST /api/check {db_id, sql, preset?, quiet?} -> audit + original result + corrected result (auditor rewrite, or a
 hand-written fix for a preset whose SQL is unchanged) + headline (first number that changed) + highlights.
 GET /api/presets -> real queries from the BIRD dev answer keys (five with verified fan-out, one clean).
 /api/check also returns, per flagged finding, "fanout": the counted table vs the table that repeats it, their
@@ -699,23 +699,36 @@ class CheckIn(BaseModel):
     db_id: str
     sql: str
     preset: str | None = None
+    quiet: bool = False  # true: answer only, no broadcast to the table/board sockets (laptop attract mode)
 
 
-# Called after every successful /api/check as await fn(result, preset_or_None); app.py uses it to tell the
-# table screen. A listener failure never fails the check.
+# Called after every successful non-quiet /api/check as await fn(result, preset_or_None); app.py uses it to tell
+# the table screen. A listener failure never fails the check.
 check_listeners: list[Callable[[dict[str, Any], dict[str, Any] | None], Awaitable[None]]] = []
+
+
+CHECK_SLOTS = 2  # concurrent checks (each up to ~35 s of SQLite in a thread); the rest wait without a thread
+_check_sem: asyncio.Semaphore | None = None
 
 
 @router.post("/api/check")
 async def api_check(body: CheckIn) -> Any:
+    global _check_sem
     sql = body.sql.strip()
     if not known_db(body.db_id):
-        return JSONResponse({"error": f"unknown database: {body.db_id}"}, status_code=400)
+        return JSONResponse({"error": f"unknown database: {body.db_id[:80]}"}, status_code=400)
     if not sql or len(sql) > MAX_SQL_CHARS:
         return JSONResponse({"error": f"SQL must be 1-{MAX_SQL_CHARS} characters"}, status_code=400)
-    out = await asyncio.to_thread(check, body.db_id, sql, body.preset, grid=True)
+    if _check_sem is None:
+        _check_sem = asyncio.Semaphore(CHECK_SLOTS)
+    try:
+        async with _check_sem:  # a burst of checks cannot take every worker thread the answer queue needs
+            out = await asyncio.to_thread(check, body.db_id, sql, body.preset, grid=True)
+    except Exception as e:  # noqa: BLE001 - a JSON error, not a 500 traceback
+        print(f"[altimeter] check failed: {type(e).__name__}", flush=True)
+        return JSONResponse({"error": "the check failed on the server"}, status_code=500)
     p = _BY_ID.get(body.preset or "")
-    for fn in check_listeners:
+    for fn in [] if body.quiet else check_listeners:
         try:
             await fn(out, p if p and p["db_id"] == body.db_id else None)
         except Exception:  # noqa: BLE001

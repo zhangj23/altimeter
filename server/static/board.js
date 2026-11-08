@@ -8,6 +8,9 @@ const BANDS = [ // same edges as app.js / table.js
   { key: "cruise", name: "Cruise", from: 0.8, to: 1 },
 ];
 const bandOf = (s) => BANDS.find((b) => s < b.to) || BANDS[BANDS.length - 1];
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const fig = (s) => clamp01(s).toFixed(2); // the reading as shown; its band is the band of this figure, as on the phone
+const bandAt = (s) => bandOf(Number(fig(s)));
 const VISIBLE = 12;
 const KEEP = 40;
 const STEP = 150;     // ms per flap, same as --step
@@ -27,13 +30,20 @@ function intermediate(target) {
   return pool ? pool[Math.floor(Math.random() * pool.length)] : target;
 }
 
+// Poppins has no arrow glyph and the system fallback draws it tiny, so the arrow is drawn as a stroke.
+const ARROW = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5H8.4M5.6 2.2L8.4 5L5.6 7.8"/></svg>';
+function put(cell, ch) {
+  if (ch === "→") { cell.innerHTML = ARROW; cell.setAttribute("aria-label", "to"); }
+  else { cell.textContent = ch; cell.removeAttribute("aria-label"); }
+}
+
 // Flip one cell to `ch`. A cycling cell passes through two intermediate characters first.
 function setCell(cell, ch, delay, cycle, instant) {
   if (cell.dataset.ch === ch) return;
   cell.dataset.ch = ch;
   const token = {};
   cell._tok = token;
-  if (instant || reduced()) { cell.textContent = ch; return; }
+  if (instant || reduced()) { put(cell, ch); return; }
   const seq = cycle && ch.trim() ? [intermediate(ch), intermediate(ch), ch] : [ch];
   let i = 0;
   const step = () => {
@@ -42,7 +52,7 @@ function setCell(cell, ch, delay, cycle, instant) {
     void cell.offsetWidth; // restart the animation
     cell.classList.add("flip");
     const next = seq[i++];
-    setTimeout(() => { if (cell._tok === token) cell.textContent = next; }, STEP / 2);
+    setTimeout(() => { if (cell._tok === token) put(cell, next); }, STEP / 2);
     if (i < seq.length) setTimeout(step, STEP);
   };
   setTimeout(step, delay);
@@ -55,7 +65,10 @@ function setMono(field, text, width, opts = {}) {
   let t = text || "";
   if (t.length > width) t = t.slice(0, width - 1) + "…"; // a cut value says so
   if (opts.right) t = t.padStart(width, " ");
-  for (let i = 0; i < width; i++) setCell(field.children[i], (t[i] || "").trim(), i * STAGGER, opts.cycle !== false, opts.instant);
+  if (opts.upper) t = t.toUpperCase(); // names flap in capitals, as on a departures board
+  for (let i = 0; i < width; i++) {
+    setCell(field.children[i], (t[i] || "").trim(), i * STAGGER, opts.cycle !== false, opts.instant);
+  }
   field.className = "f " + (opts.cls || "");
 }
 
@@ -106,7 +119,7 @@ function fillBlank() {
 }
 
 function newRow(id, kind, job) {
-  const r = { id, kind, at: new Date(), db: job.db_id || "", question: job.question || "", startedAt: null,
+  const r = { id, kind, at: restoring ? null : new Date(), db: job.db_id || "", question: job.question || "", startedAt: null,
               reading: null, band: null, status: "", detail: "", cls: "", flagged: false, seconds: null, el: el("div", "row") };
   for (const k of ["time", "db", "q", "reading", "band", "status", "detail"]) {
     const f = el("div", "f" + (k === "q" ? " q" : ""));
@@ -125,12 +138,12 @@ function newRow(id, kind, job) {
 function paint(r, instant) {
   tally(r);
   const f = (k) => r.el.querySelector(`.f[data-k="${k}"]`);
-  setMono(f("time"), hhmm(r.at), W.time, { instant });
-  setMono(f("db"), String(r.db || "").startsWith("upload:") ? "uploaded data" : r.db, W.db, { instant });
+  setMono(f("time"), r.at ? hhmm(r.at) : "", W.time, { instant });
+  setMono(f("db"), String(r.db || "").startsWith("upload:") ? "uploaded data" : r.db, W.db, { instant, upper: true });
   setQuestion(f("q"), r.question, instant);
-  const b = r.reading == null || r.uncal ? null : bandOf(r.reading); // uploads: the bands are not calibrated for them
-  setMono(f("reading"), r.reading == null ? "" : r.reading.toFixed(2), W.reading, { instant, cls: b ? b.key : "" });
-  setMono(f("band"), b ? b.name : r.uncal && r.reading != null ? "UNCAL" : "", W.band, { instant, cls: b ? b.key : r.uncal ? "dim" : "" });
+  const b = r.reading == null || r.uncal ? null : bandAt(r.reading); // uploads: the bands are not calibrated for them
+  setMono(f("reading"), r.reading == null ? "" : fig(r.reading), W.reading, { instant, cls: b ? b.key : "" });
+  setMono(f("band"), b ? b.name : r.uncal && r.reading != null ? "UNCAL" : "", W.band, { instant, upper: true, cls: b ? b.key : r.uncal ? "dim" : "" });
   setMono(f("status"), r.status, W.status, { instant, cls: r.cls });
   setMono(f("detail"), r.detail, W.detail, { instant, cls: r.cls });
   f("detail").title = r.detailFull || "";
@@ -226,23 +239,40 @@ function onCheck(m) {
   paint(r);
 }
 
+let restoring = false; // rows created while replaying a snapshot have no known time
 function onSnapshot(m) {
-  if (m.last && m.last.job) (m.last.type === "check" ? onCheck : onJob)(m.last);
-  if (m.current) { const r = upsert(m.current.id, "job", m.current); if (r.status !== "LANDED") { r.status = "IN FLIGHT"; r.cls = ""; paint(r); } }
-  for (const q of m.queue || []) { const r = upsert(q.id, "job", q); if (!r.status) { r.status = "QUEUED"; r.cls = "dim"; paint(r); } }
+  restoring = true;
+  try {
+    // a job shown as queued or in flight that finished while the link was down: its outcome was not seen
+    const live = new Set([m.current && m.current.id, ...(m.queue || []).map((q) => q.id), m.last && m.last.job && m.last.job.id]);
+    for (const r of rows.values()) {
+      if ((r.status === "QUEUED" || r.status === "IN FLIGHT") && !live.has(r.id)) { r.status = "UNKNOWN"; r.cls = "dim"; r.detail = ""; paint(r); }
+    }
+    // the replayed last message still carries the queue from when it was first sent; that queue is stale
+    if (m.last && m.last.job) (m.last.type === "check" ? onCheck : onJob)({ ...m.last, queue: [] });
+    if (m.current) { const r = upsert(m.current.id, "job", m.current); if (r.status !== "LANDED") { r.status = "IN FLIGHT"; r.cls = ""; paint(r); } }
+    for (const q of m.queue || []) { const r = upsert(q.id, "job", q); if (!r.status || r.status === "UNKNOWN") { r.status = "QUEUED"; r.cls = "dim"; paint(r); } }
+  } finally { restoring = false; }
 }
 
 /* ---------- counters: kept apart from the rows, which are trimmed to KEEP ---------- */
 const landed = new Map(); // id -> answer seconds (null when unknown)
+const landedBand = new Map(); // id -> band key of a landed answer with a calibrated reading
 const flaggedIds = new Set();
 function tally(r) {
   if (r.status === "LANDED") landed.set(r.id, r.seconds); else landed.delete(r.id);
+  if (r.status === "LANDED" && r.reading != null && !r.uncal) landedBand.set(r.id, bandAt(r.reading).key); else landedBand.delete(r.id);
   if (r.flagged) flaggedIds.add(r.id); else flaggedIds.delete(r.id);
 }
 function counters(instant) {
   const secs = [...landed.values()].filter((s) => s != null).sort((a, b) => a - b);
   const med = secs.length ? (secs.length % 2 ? secs[(secs.length - 1) / 2] : (secs[secs.length / 2 - 1] + secs[secs.length / 2]) / 2) : null;
   setMono($("c-answered"), String(landed.size), 3, { instant, right: true });
+  for (const b of BANDS) {
+    let k = 0;
+    for (const v of landedBand.values()) if (v === b.key) k++;
+    setMono($(`c-${b.key}`), String(k), 3, { instant, right: true, cls: b.key });
+  }
   setMono($("c-flagged"), String(flaggedIds.size), 3, { instant, right: true });
   setMono($("c-median"), med == null ? "" : `${med.toFixed(med < 100 ? 1 : 0)} s`, 6, { instant, right: true });
 }
@@ -268,7 +298,7 @@ function attractRow(on) {
     rowsEl.prepend(attract);
     while (rowsEl.children.length > VISIBLE) rowsEl.lastChild.remove();
     setMono(time, "", W.time, { instant: true });
-    setMono(db, location.host, W.db); // the address a phone opens
+    setMono(db, location.host, W.db); // the address a phone opens (kept as typed)
     setQuestion(q, ATTRACT_Q);
     for (const [f, w] of [[rd, W.reading], [band, W.band], [det, W.detail]]) setMono(f, "", w, { instant: true });
     setMono(st, "BOARDING", W.status, { cls: "cruise" });

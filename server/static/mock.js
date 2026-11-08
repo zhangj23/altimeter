@@ -2,10 +2,12 @@
 /* Dev-only fixture driver, loaded by app.js only when the URL has ?mock=1. Not a measured result:
    every number here is made up for layout screenshots, and each reply is labeled "mock fixture".
    ?mock=1                       control strip under the test-flight form
-   ?mock=1&state=<name>          run one scenario on load, no strip (idle|warming|awaiting|stage|cruise|caution|ask|readings|audit|error)
+   ?mock=1&state=<name>          run one scenario on load, no strip (idle|warming|awaiting|stage|cruise|caution|ask|readings|uncal|audit|error)
    ?mock=1&state=a,b,c           run several in turn, each after the previous result (older runs collapse)
    &choose=A|B                   with state=readings, tap that reading after it renders
    &why=1                        open the Why disclosure of the newest run once it renders
+   &tower=1|send                 with state=ask, open the radio-the-tower sheet (send: and transmit). Stub of
+                                 POST /api/escalate; &cloud=404 makes it answer as if the endpoint were missing.
    ?mock=1&state=check|check-flagged|check-clear   Check mode. Its fixtures are copies of real /api/check output
                                  (BIRD q571 and q89, captured from a local run); the probe numbers are still made up.
    The explain breakdown is the shape of one real answer (formula_1, races in 2009, layer 26); the Internals row is
@@ -52,15 +54,32 @@
         { label: "B", share: 0.4, error: null, n_rows: 1, columns: ["AVG(r.fastestLapTime)"], rows: [["1:31.842"]],
           sql: "SELECT AVG(r.fastestLapTime)\nFROM results r\nJOIN drivers d ON d.driverId = r.driverId\nWHERE d.forename = 'Lewis' AND d.surname = 'Hamilton'" },
       ] },
+    uncal: { question: "What is the total of column a?", ...base, db_id: "upload:mockfixture", probe: probe(0.58), explain: explainFor(0.58, false),
+      calibrated: false, calibration_note: "Needle not calibrated for uploaded data",
+      sql: "SELECT SUM(a) FROM t", columns: ["SUM(a)"], rows: [[6]] },
     audit: { question: "For the user No.24, how many times is the number of his/her posts compared to his/her votes?", ...base,
       db_id: "codebase_community", probe: probe(0.71), explain: explainFor(0.71, false), columns: null, rows: null, sql: null },
   };
 
   const params = new URLSearchParams(location.search);
   const FX = {"presets":[{"id":"bird571","db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","label":"BIRD dev answer key, question 571 (2024 release)","question":"For user No. 24, how many times is the number of posts compared to votes?","has_fix":false},{"id":"bird89","db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","label":"BIRD dev answer key, question 89 (2024 release)","question":"How many accounts in East Bohemia chose statement issuance after each transaction?","has_fix":false}],"bird571":{"db_id":"codebase_community","sql":"SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","parses":true,"parse_error":null,"audited":true,"flagged":true,"findings":[{"table":"posts","alias":"T2","column":"T2.Id","aggregate":"COUNT(T2.Id)","joined_rows":24,"distinct_rows":3,"factor":8.0,"many_to_many":true,"fanout":{"left":{"table":"posts","alias":"T2","key":"Id","distinct":3},"right":{"table":"votes","alias":"T1","key":"Id","distinct":8},"link":"OwnerUserId","joined_rows":24,"cross":true,"max_repeat":8,"grid":{"rows":[2,10,348],"cols":[204,205,438,817,818,825,830,837],"cells":[[0,0,1],[0,1,1],[0,2,1],[0,3,1],[0,4,1],[0,5,1],[0,6,1],[0,7,1],[1,0,1],[1,1,1],[1,2,1],[1,3,1],[1,4,1],[1,5,1],[1,6,1],[1,7,1],[2,0,1],[2,1,1],[2,2,1],[2,3,1],[2,4,1],[2,5,1],[2,6,1],[2,7,1]],"sampled":false,"anchor":null,"group":null}}}],"message":"Fan-out: COUNT(T2.Id) sees each posts row 8x (24 joined rows vs 3 distinct) because of the JOIN (many-to-many: no table appears once per joined row). Deduplicated value: 0.375.","audit_error":null,"explanation":"Each posts row is counted 8 times because the query also joins votes.","intended":"If you meant to count every posts and votes pair, this is fine. If you meant to count each posts row once, use the fix.","highlights":[{"start":12,"end":24,"kind":"aggregate"},{"start":81,"end":127,"kind":"join"}],"original":{"columns":["CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[3.0]],"error":null,"seconds":0.0568,"rows_capped":false},"corrected":{"sql":"SELECT CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24","source":"auditor","columns":["CAST((SELECT COUNT(T2.Id) FROM \"posts\" AS \"T2\" WHERE \"T2\".rowid IN (SELECT \"T2\".rowid FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24)) AS REAL) / COUNT(DISTINCT T1.Id)"],"rows":[[0.375]],"error":null,"seconds":0.0541,"rows_capped":false},"headline":{"column":"CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)","row":null,"before":3.0,"after":0.375,"before_text":"3.0","after_text":"0.375","ratio":8.0,"ratio_text":"8","single_cell":true},"audit_seconds":0.1456},"bird89":{"db_id":"financial","sql":"SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'","parses":true,"parse_error":null,"audited":true,"flagged":false,"findings":[],"message":"no fan-out detected","audit_error":null,"explanation":"","highlights":[],"original":{"columns":["COUNT(T2.account_id)"],"rows":[[13]],"error":null,"seconds":0.0007,"rows_capped":false},"corrected":null,"headline":null,"audit_seconds":0.0039}};
+  // Stub of POST /api/escalate (made-up payload and bytes, same shape as the contract).
+  const escalate = (body) => {
+    if (params.get("cloud") === "404") return { ok: false, status: 404, data: { detail: "Not Found" } };
+    const text = "Database Engine:\nSQLite\n\nDatabase Schema:\nCREATE TABLE drivers (driverId INTEGER PRIMARY KEY, driverRef TEXT, forename TEXT, surname TEXT);\nCREATE TABLE qualifying (qualifyId INTEGER PRIMARY KEY, raceId INTEGER, driverId INTEGER REFERENCES drivers(driverId), q1 TEXT, q2 TEXT, q3 TEXT);\n\nQuestion:\n" + body.question;
+    const payload = { contents: [{ role: "user", parts: [{ text }] }], generationConfig: { temperature: 0 } };
+    const bytes = new TextEncoder().encode(JSON.stringify(payload)).length;
+    const note = "Only the CREATE TABLE statements and the question are sent, no rows.";
+    if (!body.transmit) return { ok: true, status: 200, data: { payload, bytes, note, model: "mock-model", cached: true } };
+    return { ok: true, status: 200, data: { source: "cache", model: "mock-model", bytes, bytes_sent: 0, note,
+      sql: "SELECT MIN(q.q1)\nFROM qualifying q\nJOIN drivers d ON d.driverId = q.driverId\nWHERE d.forename = 'Lewis' AND d.surname = 'Hamilton'",
+      result: { columns: ["MIN(q.q1)"], rows: [["1:13.411"]], error: null, rows_capped: false },
+      audit: { audited: true, flagged: false, findings: [], audit_error: null } } };
+  };
   apiCall = async (url, body) => {
     await new Promise((r) => setTimeout(r, 400));
     if (url === "/api/presets") return { ok: true, status: 200, data: { presets: FX.presets } };
+    if (url === "/api/escalate") return escalate(body);
     const p = FX.presets.find((x) => x.sql === body.sql);
     return p ? { ok: true, status: 200, data: FX[p.id] } : { ok: false, status: 400, data: { error: "mock fixture: only the listed presets" } };
   };
@@ -112,6 +131,7 @@
     setMode("test");
     scenario = name;
     if (name === "stage" || name === "error") name = "caution"; // stage holds at "Scoring confidence"; error ends with a timeout
+    if (name === "uncal") { uploadDb = S.uncal.db_id; syncUploadOption(); }
     $("db").value = S[name] && S[name].db_id ? S[name].db_id : DB;
     showSchema("testSchema", $("db").value);
     $("question").value = (S[name] || S.ask).question;
@@ -135,6 +155,11 @@
         if (card) card.click();
       }, 2000 * names.length);
     }
+    if (params.get("tower")) setTimeout(() => {
+      const b = document.querySelector("#runs .run:first-child .tower-row button");
+      if (b) b.click();
+      if (params.get("tower") === "send") setTimeout(() => $("towerSend").click(), 900);
+    }, 2000 * names.length);
     if (params.get("why") === "1") setTimeout(() => {
       const d = document.querySelector("#runs .run:first-child details.why");
       if (d) { d.open = true; d.scrollIntoView({ block: "start" }); }

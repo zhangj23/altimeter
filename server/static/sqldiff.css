@@ -107,3 +107,12 @@ ins.sd-g .sd-t::after {
 .sd-copy:active { transform: translateY(1px); background: var(--panel-3); }
 .sd-copy:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .sd-copied { font-size: var(--t0); font-weight: 400; color: var(--ink-2); }
+
+/* compact mode: a run of unchanged lines folded into one row; a click shows them */
+.sd-fold {
+  display: block; width: 100%; min-height: 1.6em; margin: 0; padding: 0 0 0 8px; border: 0; border-radius: 0;
+  background: transparent; font: inherit; color: var(--ink-3); text-align: left; cursor: pointer;
+}
+.sd-fold:hover { color: var(--ink-2); background: var(--panel-2); }
+.sd-fold:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+.sd-fold-ch { color: var(--ink-2); } /* the fold holds changed lines too */
