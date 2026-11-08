@@ -12,11 +12,16 @@ Server -> phone (job_id on every job message):
   {type:"queued", job_id, position}  {type:"working", job_id, elapsed}  {type:"stage", job_id, stage, elapsed}
   {type:"result", job_id, ...answer}  {type:"error", job_id?, message}
   stage is "generating" | "scoring" | "executing" | "sampling" (sampling only when two-readings run).
+  result carries, when ~/models/probe_layers.json (or ALTIMETER_LAYERS_PATH) exists, per-layer probe scores
+  computed before the SQL runs: "layers": [{"layer": int, "p": float, "z": float, "auroc": [pt, lo, hi] | null}]
+  sorted by layer, plus "layers_synthetic": true for a synthetic test file; "layers_error": str if scoring failed.
+  "explain" (table breakdown) has stack_terms, stack_intercept, probe_terms, model_card (see altimeter/probe.py).
 The gateway remembers each client's pending job and last result for 15 min, so a phone that drops its socket
 mid-job gets the queue position / stage / finished result again when it reconnects with the same client id.
 
 Table socket /ws/table receives a snapshot on connect, then every job's events, each with
 job {id, db_id, question} and the waiting queue: queued / working / stage {stage} / result / error.
+A table "result" is the phone's result dict unchanged (same "layers", "layers_synthetic", "explain", "timing").
 Pre-flight checks are broadcast too, after each successful POST /api/check, with exactly this shape:
   {"type": "check", "job": {"id": int, "db_id": str, "question": str (only for a preset)},
    "check": <the /api/check response object, unchanged>}
@@ -109,7 +114,7 @@ class Gateway:
                 "warm_seconds": None if ready or not w else round(time.time() - w.warm_started, 1),
                 "queue": len(self.waiting) + (1 if self.current else 0),
                 "fake": bool(w and w.fake), "probe": info.get("probe") if ready else None,
-                "restarts": w.restarts if w else 0}
+                "restarts": w.restarts if w else 0, "layers": info.get("layers") if ready else None}
 
     def attach(self, cid: str, ws: WebSocket) -> Client:
         now = time.time()

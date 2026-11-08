@@ -50,6 +50,24 @@ class Probe:
         self.stack_features: list[str] = list(d.get("stack_features", ["probe", "logprob_mean", "logprob_min",
                                                                        *SURFACE_NAMES]))
         self.extra = {k: d[k] for k in ("layer_auroc", "ece", "track_record", "synthetic") if k in d}
+        self.model_card = self._model_card(d)
+
+    def _model_card(self, d: dict) -> dict:
+        """Static facts about the exported model, for the UI. The probe recipe text mirrors
+        scripts/train_probe.py (probe_pipe + export_linear); everything else is read from the JSON."""
+        pos = {"mean_gen": "mean over SQL tokens", "last_gen": "last SQL token",
+               "last_prompt": "last prompt token"}.get(self.position, self.position)
+        n_in = len(self.stack_features)
+        return {
+            "stack": f"logistic regression with {n_in} inputs (StandardScaler, then logistic regression)",
+            "stack_inputs": n_in,
+            "probe": (f"StandardScaler -> PCA 256 -> L2 logistic, collapsed to one linear vector over "
+                      f"{self.w.shape[0]:,} activations at layer {self.layer}, {pos}"),
+            "probe_layer": self.layer, "probe_position": self.position, "probe_dims": int(self.w.shape[0]),
+            "platt": {"a": self.platt[0], "b": self.platt[1]},
+            "n_train": d.get("n_train"), "excluded_dbs": d.get("excluded_dbs"),
+            "select_on": d.get("select_on"), "synthetic": bool(d.get("synthetic", False)),
+        }
 
     def score(self, hidden: np.ndarray, logprob_mean: float, logprob_min: float, surface: list[float]) -> ProbeScore:
         """hidden: (L+1, d) features at self.position; uses self.layer."""
@@ -83,16 +101,33 @@ class Probe:
         idx = {n: i for i, n in enumerate(self.stack_features)}
         groups = [{"name": name, "value": float(sum(sc[idx[m]] for m in members)), "members": members}
                   for name, members in STACK_GROUPS]
-        logit = self.stack_b + float(sum(g["value"] for g in groups))
+        group_of = {m: name for name, members in STACK_GROUPS for m in members}
+        # One term per stack input, in stack_features order: logit = stack_intercept + sum(contribution), exactly.
+        stack_terms = [{"name": n, "group": group_of.get(n, "Other"), "weight": float(self.stack_w[i]),
+                        "value": float(f[i]), "mean": float(self.stack_mean[i]), "scale": float(self.stack_scale[i]),
+                        "scaled": float(x[i]), "contribution": float(sc[i])}
+                       for i, n in enumerate(self.stack_features)]
+        logit = self.stack_b
+        for t in stack_terms:
+            logit += t["contribution"]
+        rest = float(c.sum() - c[top].sum())
+        probe_terms = {
+            "layer": self.layer, "position": self.position, "b0": b0, "z": z, "centered": centered,
+            "dims": [{"dim": int(i), "weight": float(w[i]), "activation": float(h[i]), "mean": float(mu[i]),
+                      "contribution": float(c[i])} for i in top],
+            "rest": rest, "n_rest": int(c.shape[0] - len(top)),
+        }
         return {
             "layer": self.layer, "position": self.position, "n_layers": int(hidden.shape[0]) - 1,
             "centered": centered, "b0": b0, "z": z, "p_raw": s.probe, "p_cal": s.calibrated,
             "platt_a": self.platt[0], "platt_b": self.platt[1],
-            "dims": [[int(i), float(c[i])] for i in top], "rest": float(c.sum() - c[top].sum()),
+            "dims": [[int(i), float(c[i])] for i in top], "rest": rest,
             "share_top20": share20, "d": int(c.shape[0]),
             "stack_ref": self.stack_b, "groups": groups, "logit": logit, "needle": _sigmoid(logit),
             "features": [{"name": n, "value": float(f[i]), "contrib": float(sc[i])}
                          for i, n in enumerate(self.stack_features)],
+            "stack_terms": stack_terms, "stack_intercept": self.stack_b,
+            "probe_terms": probe_terms, "model_card": self.model_card,
             **self.extra,
         }
 

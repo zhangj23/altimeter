@@ -2,8 +2,14 @@
 
 Opens no network sockets (HF_HUB_OFFLINE is set by altimeter.model; the only I/O is the Pipe + SQLite).
 ALTIMETER_FAKE=1 (or fake=True) skips the model and returns a canned SQL that is executed for real.
-ALTIMETER_READINGS=auto|always|off: two-readings sampling after the greedy answer (auto = only when the needle
-is missing or below readings.ASK_BELOW). Fake mode builds readings from two real queries.
+ALTIMETER_READINGS=off|auto|always (default off): two-readings sampling after the greedy answer (auto = only when
+the needle is missing or below readings.ASK_BELOW; it adds ~6 sampled generations, ~15 s on the 4050). Fake mode
+builds readings from two real queries.
+ALTIMETER_LAYERS_PATH (default ~/models/probe_layers.json): per-layer probes (altimeter/layers.py). When the file
+exists the result carries "layers": [{"layer", "p", "z", "auroc"}] (+ "layers_synthetic": true for a synthetic
+test file), computed before the SQL runs; it is re-read when the file changes. Missing file: no "layers" field.
+Every real-model result also has "timing": {"prompt_s","generate_s","features_s","score_s","layers_s","exec_s",
+"worker_s"} (seconds) for latency profiling.
 
 Pipe protocol (worker -> parent): {"type":"ready"} once after load + warm-up; per request, zero or more
 {"type":"stage","stage":"generating"|"scoring"|"executing"|"sampling"} and then the result dict (no "type").
@@ -117,8 +123,8 @@ def _score(probe: Any, g: Any, question: str, path: str) -> dict[str, Any] | Non
 
 
 def _readings_mode() -> str:
-    mode = os.environ.get("ALTIMETER_READINGS", "auto").strip().lower()
-    return mode if mode in ("auto", "always", "off") else "auto"
+    mode = os.environ.get("ALTIMETER_READINGS", "off").strip().lower()
+    return mode if mode in ("auto", "always", "off") else "off"
 
 
 def _fake_samples(path: str) -> list[str]:
@@ -159,10 +165,12 @@ def _readings(model: Any, messages: list[dict[str, str]] | None, path: str, need
                 "readings_error": f"{type(e).__name__}: {e}"}
 
 
-def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None) -> dict[str, Any]:
+def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None, layer_src: Any = None) -> dict[str, Any]:
+    from altimeter.layers import result_fields
     from altimeter.prompting import build_messages
 
     emit = emit or (lambda _stage: None)
+    t_start = time.perf_counter()
     db_id, question = req["db_id"], req["question"]
     emit("generating")
     if os.environ.get("ALTIMETER_STALL_TEST") == "1" and question.strip().lower() == STALL_QUESTION:
@@ -170,11 +178,15 @@ def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None) -> di
     path = db_path(db_id)
     score = None
     messages = None
+    layers: dict[str, Any] = {}
+    timing: dict[str, Any] | None = None
     if model is None:  # fake mode
         time.sleep(1.0)
         gen = {"sql": FAKE_SQL, "gen_seconds": 1.0, "n_prompt": 0, "n_gen": 0, "logprob_mean": None, "logprob_min": None}
     else:
+        t0 = time.perf_counter()
         messages = build_messages(path, question)
+        t_prompt = time.perf_counter() - t0
         g = model.generate(messages)
         gen = {
             "sql": g.sql,
@@ -186,14 +198,27 @@ def _answer(model: Any, probe: Any, req: dict[str, Any], emit: Any = None) -> di
         }
         if probe is not None:
             emit("scoring")
+        t0 = time.perf_counter()
         score = _score(probe, g, question, path)  # before execution
+        t_score = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        layers = result_fields(layer_src, {"last_prompt": g.hs_last_prompt, "last_gen": g.hs_last_gen,
+                                           "mean_gen": g.hs_mean_gen})  # also before execution
+        t_layers = time.perf_counter() - t0
+        timing = {"prompt_s": round(t_prompt, 4), "generate_s": round(g.gen_seconds, 3),
+                  "features_s": round(g.feat_seconds, 3), "score_s": round(t_score, 4),
+                  "layers_s": round(t_layers, 4)}
         del g
     emit("executing")
     result = execute(db_id, gen["sql"])  # greedy answer runs before any sampling
     needle = score["needle"] if score else None
     explain = score.pop("explain", None) if score else None
-    return {"db_id": db_id, "question": question, **gen, "probe": score, "explain": explain, **result,
-            **_readings(model, messages, path, needle, emit), "fake": model is None}
+    readings = _readings(model, messages, path, needle, emit)
+    if timing is not None:
+        timing["exec_s"] = result["exec_seconds"]
+        timing["worker_s"] = round(time.perf_counter() - t_start, 3)
+    return {"db_id": db_id, "question": question, **gen, "probe": score, "explain": explain, **layers, **result,
+            **readings, "timing": timing, "fake": model is None}
 
 
 def _warm_up(model: Any, probe: Any) -> list[dict[str, Any]]:
@@ -222,8 +247,10 @@ def _warm_up(model: Any, probe: Any) -> list[dict[str, Any]]:
 
 
 def worker_main(conn: Connection, fake: bool) -> None:
-    model = probe = None
+    model = probe = layer_src = None
     if not fake:
+        from altimeter.layers import LayerSource
+
         from altimeter.model import SqlModel
 
         model = SqlModel(MODEL_PATH)
@@ -231,8 +258,14 @@ def worker_main(conn: Connection, fake: bool) -> None:
             from altimeter.probe import Probe
 
             probe = Probe(str(PROBE_PATH))
+        layer_src = LayerSource()
     warm = [] if model is None else _warm_up(model, probe)
-    conn.send({"type": "ready", "fake": fake, "probe": probe is not None, "warmup": warm})
+    layers_info = None
+    if layer_src is not None:
+        lp = layer_src.get()
+        layers_info = {"path": str(layer_src.path), "loaded": lp is not None, "error": layer_src.error,
+                       "n": len(lp.layer_ids) if lp else 0, "synthetic": bool(lp and lp.synthetic)}
+    conn.send({"type": "ready", "fake": fake, "probe": probe is not None, "warmup": warm, "layers": layers_info})
     while True:
         try:
             req = conn.recv()
@@ -241,7 +274,7 @@ def worker_main(conn: Connection, fake: bool) -> None:
         if req is None:
             return
         try:
-            out = _answer(model, probe, req, lambda stage: conn.send({"type": "stage", "stage": stage}))
+            out = _answer(model, probe, req, lambda stage: conn.send({"type": "stage", "stage": stage}), layer_src)
         except Exception as e:  # noqa: BLE001 - report any failure (e.g. CUDA OOM) to the client
             out = {"db_id": req.get("db_id"), "question": req.get("question"), "error": f"{type(e).__name__}: {e}",
                    "sql": None, "columns": None, "rows": None, "probe": None}

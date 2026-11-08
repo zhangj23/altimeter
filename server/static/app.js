@@ -6,11 +6,16 @@ const BANDS = [
   { key: "caution", name: "Caution", from: 0.5, to: 0.8 },
   { key: "cruise", name: "Cruise", from: 0.8, to: 1 },
 ];
-const SHOW_ROWS = 12;
 const PREVIEW_ROWS = 3;
-const KEEP_PASSES = 6;
+const KEEP_MESSAGES = 24;
 // Dev-only fixture driver (mock.js). Nothing below changes behavior unless the URL has ?mock=1.
 const MOCK = new URLSearchParams(location.search).get("mock") === "1";
+// Empty-thread suggestions: questions whose landing is known from our own runs.
+const SUGGEST = [
+  ["How many badges has the user csgillespie obtained?", "codebase_community"],
+  ["What's Lewis Hamilton's reference name?", "formula_1"],
+  ["What is the rate of drivers completing all the laps in the 2008 Australian Grand Prix?", "formula_1"],
+];
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -19,11 +24,13 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
+const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const smoothScroll = () => (REDUCED() ? "auto" : "smooth");
 
 let ws = null;
 let retryMs = 500;
 let retryTimer = null;
-let pending = null; // {question, db_id, t0, phase: sent|queued|working|offline, stage, job_id, queueText}
+let pending = null; // {question, db_id, t0, phase: sent|queued|working|offline, stage, job_id, queueText, card}
 let tick = null;
 let serverStatus = null; // last {type:"status"} from the gateway
 let warmT0 = null; // performance.now() when the model started warming
@@ -47,94 +54,127 @@ const CLIENT = (() => {
 })();
 let lastJob = Number(store.get("altimeter.lastJob")) || null; // last result this phone rendered
 
-/* ---------- instrument ---------- */
-function buildTape() {
-  for (let i = 0; i <= 10; i++) {
-    const t = el("span");
-    t.style.left = `calc(${i * 10}% - ${i === 10 ? 1 : 0}px)`;
-    $("ticks").append(t);
-  }
-  for (const b of BANDS) {
-    const w = (b.to - b.from) * 100 + "%";
-    const seg = el("span", "b-" + b.key);
-    seg.style.width = w;
-    $("bands").append(seg);
-    const name = el("span", null, b.name);
-    name.style.width = w;
-    $("names").append(name);
-  }
+/* ---------- dial ---------- */
+// The scale sweeps 270 degrees: 0 at bottom-left (-135) to 1 at bottom-right (+135). The gap holds the drum window.
+const SWEEP_FROM = -135, SWEEP = 270;
+const angleOf = (s) => SWEEP_FROM + SWEEP * s;
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
 }
-
+function polar(s, r) {
+  const a = (angleOf(s) * Math.PI) / 180;
+  return [150 + r * Math.sin(a), 150 - r * Math.cos(a)];
+}
+function arcPath(s0, s1, r) {
+  const [x0, y0] = polar(s0, r), [x1, y1] = polar(s1, r);
+  return `M${x0.toFixed(2)} ${y0.toFixed(2)}A${r} ${r} 0 ${SWEEP * (s1 - s0) > 180 ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+}
 function bandOf(s) { return BANDS.find((b) => s < b.to) || BANDS[BANDS.length - 1]; }
-function bandInk(key) { return key === "caution" ? "var(--caution-ink)" : `var(--${key})`; }
+const clamp01 = (s) => Math.min(1, Math.max(0, s));
 
-// Park the marker at 0 with no transition (used when a new question starts).
-function parkCarriage() {
-  const c = $("carriage");
-  c.classList.add("snap");
-  c.style.transform = "translateX(0)";
-  void c.offsetWidth; // commit the jump before transitions come back
-  c.classList.remove("snap");
-}
+/* A round altimeter: SVG face plus an HTML drum counter in the window. Returns {root, set(score, mode)}. */
+function makeDial() {
+  const root = el("div", "dial idle");
+  root.setAttribute("aria-hidden", "true");
+  const svg = svgEl("svg", { viewBox: "0 0 300 300" });
+  svg.append(svgEl("circle", { class: "face", cx: 150, cy: 150, r: 146 }),
+    svgEl("circle", { class: "bezel", cx: 150, cy: 150, r: 143 }),
+    svgEl("circle", { class: "bezel-edge", cx: 150, cy: 150, r: 147 }),
+    svgEl("circle", { class: "bezel-edge", cx: 150, cy: 150, r: 139 }));
+  const gap = 0.004;
+  for (const b of BANDS) svg.append(svgEl("path", { class: "arc arc-" + b.key, d: arcPath(b.from + gap, b.to - gap, 123) }));
+  for (let i = 0; i <= 50; i++) {
+    const s = i / 50, major = i % 5 === 0;
+    const [x1, y1] = polar(s, 116), [x2, y2] = polar(s, major ? 100 : 108);
+    svg.append(svgEl("line", { class: major ? "tick-major" : "tick-minor", x1: x1.toFixed(2), y1: y1.toFixed(2), x2: x2.toFixed(2), y2: y2.toFixed(2) }));
+  }
+  for (const [s, label] of [[0, "0"], [0.5, ".5"], [0.8, ".8"], [1, "1"]]) {
+    const [x, y] = polar(s, 80);
+    const t = svgEl("text", { class: "num", x: x.toFixed(2), y: y.toFixed(2) });
+    t.textContent = label;
+    svg.append(t);
+  }
+  svg.append(svgEl("rect", { class: "window", x: 84, y: 186, width: 132, height: 48 }));
+  const needle = svgEl("g", { class: "needle" });
+  needle.append(svgEl("polygon", { class: "needle-body", points: "150,40 146.8,142 146.8,176 153.2,176 153.2,142" }),
+    svgEl("circle", { class: "hub", cx: 150, cy: 150, r: 6.5 }));
+  const wobble = svgEl("g", { class: "wobble" });
+  wobble.append(needle);
+  svg.append(wobble);
+  root.append(svg);
+  // Drum: digit, point, digit, digit; the point never moves.
+  const drum = el("div", "drum blank");
+  for (let k = 0; k < 4; k++) {
+    if (k === 1) { drum.append(el("span", "dot", ".")); continue; }
+    const slot = el("span", "slot");
+    const reel = el("span", "reel");
+    for (const ch of "0123456789-") reel.append(el("span", null, ch));
+    slot.append(reel);
+    drum.append(slot);
+  }
+  root.append(drum);
+  const reels = drum.querySelectorAll(".reel");
 
-/* mode: "idle" (no marker), "hold" (awaiting probe, hollow marker parked), or a score in 0..1 */
-function setGauge(score, mode) {
-  const needle = $("needle");
-  const band = $("band");
-  if (mode === "hold") {
-    parkCarriage();
-    $("value").textContent = "--";
-    band.textContent = "Awaiting probe";
-    band.className = "awaiting";
-    band.style.color = "";
-    $("tape").classList.remove("scored");
-    needle.className = "needle hold";
-    return;
+  function setDrum(text, snap) {
+    drum.classList.toggle("blank", text == null);
+    drum.classList.toggle("snap", !!snap);
+    if (snap) void drum.offsetWidth;
+    const chars = (text || "-.--").split("");
+    [chars[0], chars[2], chars[3]].forEach((ch, i) => {
+      const k = ch === "-" ? 10 : Number(ch);
+      reels[i].style.transform = `translateY(${(0.55 - k).toFixed(2)}em)`;
+    });
+    if (snap) { void drum.offsetWidth; drum.classList.remove("snap"); }
   }
-  if (score == null || Number.isNaN(score)) {
-    $("value").textContent = "--";
-    band.textContent = mode === "noprobe" ? "No probe" : "No reading";
-    band.className = "";
-    band.style.color = "";
-    $("tape").classList.remove("scored");
-    needle.className = "needle";
-    return;
+  function point(s, snap) {
+    if (snap) { needle.classList.add("snap"); void needle.getBoundingClientRect(); }
+    needle.style.transform = `rotate(${angleOf(s).toFixed(2)}deg)`;
+    if (snap) { void needle.getBoundingClientRect(); needle.classList.remove("snap"); }
   }
-  const s = Math.min(1, Math.max(0, score));
-  const b = bandOf(s);
-  $("value").textContent = s.toFixed(2);
-  band.textContent = b.name;
-  band.className = "";
-  band.style.color = bandInk(b.key);
-  $("tape").classList.add("scored");
-  needle.className = "needle on";
-  // Percent of the carriage's own width, which equals the tape width: survives resizes and rotation.
-  $("carriage").style.transform = `translateX(${(s * 100).toFixed(2)}%)`;
+  /* mode: "idle" (no reading), "hold" (awaiting probe: hollow needle parked at 0), or a score in 0..1 */
+  function set(score, mode) {
+    if (mode === "hold") { root.className = "dial hold"; point(0, true); setDrum(null, true); return; }
+    if (score == null || Number.isNaN(score)) { root.className = "dial idle"; point(0, false); setDrum(null, false); return; }
+    const s = clamp01(score);
+    root.className = "dial scored";
+    point(s, false);
+    setDrum(s.toFixed(2), false);
+  }
+  return { root, set };
 }
 
 /* ---------- status line and announcements ---------- */
-function setStatus(text) { $("status").textContent = text; }
+function setStatus(text, clock, err) {
+  $("statusText").textContent = text || "";
+  $("clock").textContent = clock || "";
+  $("status").classList.toggle("err", !!err);
+  $("status").classList.toggle("on", !!text);
+}
 function announce(text) { $("announce").textContent = text; }
 
 const STAGES = { generating: "Generating SQL", scoring: "Scoring confidence", executing: "Running the query", sampling: "Sampling other readings" };
 const warming = () => !!(serverStatus && serverStatus.warming);
 const warmSecs = () => (warmT0 == null ? 0 : Math.round((performance.now() - warmT0) / 1000));
 
-/* The status line while something is in progress, or null when nothing is (leave the last message). */
+/* What the pending reply card says while the laptop works: [text, clock], or null when nothing is in progress. */
 function liveText() {
   if (pending) {
-    if (pending.phase === "offline") return "Link lost. The laptop keeps your question; reconnecting.";
-    if (pending.phase === "working") return `${STAGES[pending.stage] || STAGES.generating} · ${((performance.now() - pending.t0) / 1000).toFixed(1)} s`;
-    if (warming()) return `Waiting for the model to warm up · ${warmSecs()} s`;
-    return pending.queueText || "Sent";
+    if (pending.phase === "offline") return ["Link lost. The laptop keeps your question; reconnecting.", ""];
+    if (pending.phase === "working") return [STAGES[pending.stage] || STAGES.generating, `${((performance.now() - pending.t0) / 1000).toFixed(1)} s`];
+    if (warming()) return ["Waiting for the model to warm up", `${warmSecs()} s`];
+    return [pending.queueText || "Sent", ""];
   }
-  if (warming()) return `Warming up the model · ${warmSecs()} s`;
+  if (warming()) return ["Warming up the model", `${warmSecs()} s`];
   return null;
 }
 function refresh() {
   const t = liveText();
   if (t == null) return stopClock();
-  setStatus(t);
+  if (pending && pending.card) { pending.card.stage(t[0], t[1]); setStatus(""); }
+  else setStatus(t[0], t[1]);
 }
 function startClock() {
   if (!tick) tick = setInterval(refresh, 100);
@@ -144,14 +184,95 @@ function stopClock() { if (tick) clearInterval(tick); tick = null; }
 
 function syncAsk() {
   $("ask").disabled = !!pending || warming();
-  $("ask").textContent = pending ? "Asking" : "Ask";
+  $("ask").textContent = pending ? "In flight" : "Run test flight";
 }
-function busy() { syncAsk(); }
 
-/* ---------- boarding pass ---------- */
+/* ---------- runs (test flights), newest on top ---------- */
+function clearSuggestions() { const s = $("runs").querySelector(".suggest"); if (s) s.remove(); }
+
+function renderSuggestions(dbs) {
+  if ($("runs").children.length) return;
+  const box = el("div", "suggest");
+  box.append(el("p", null, "Three questions to try"));
+  for (const [q, db] of SUGGEST) {
+    if (dbs && !dbs.includes(db)) continue;
+    const b = el("button");
+    b.type = "button";
+    b.append(document.createTextNode(q), el("small", null, db));
+    b.addEventListener("click", () => {
+      if ($("db").querySelector(`option[value="${db}"]`)) $("db").value = db;
+      $("question").value = q;
+      $("flight").requestSubmit();
+    });
+    box.append(b);
+  }
+  $("runs").append(box);
+}
+
+/* A run: header (question, database; one line with score and band once collapsed) and the instrument card,
+   whose dial holds in the awaiting pattern with the stage line until fill() or fail() replaces it. */
+function newRun(question, db_id) {
+  clearSuggestions();
+  const list = $("runs");
+  for (const old of list.querySelectorAll(".run.done")) old.classList.add("collapsed");
+  const run = el("article", "run");
+  const head = el("div", "head");
+  head.tabIndex = 0;
+  head.setAttribute("role", "button");
+  head.setAttribute("aria-expanded", "true");
+  const q = el("div", "q", question);
+  q.append(el("small", null, db_id));
+  const sum = el("div", "sum");
+  head.append(q, sum);
+  const toggle = () => {
+    if (!run.classList.contains("done")) return;
+    const c = run.classList.toggle("collapsed");
+    head.setAttribute("aria-expanded", String(!c));
+  };
+  head.addEventListener("click", toggle);
+  head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+  const card = el("div", "body reply");
+  const top = el("section", "reading-row");
+  const dial = makeDial();
+  const read = el("div", "read");
+  const stage = el("div", "stage");
+  const stageText = el("b", null, "Awaiting probe");
+  const stageLine = el("span", null, "");
+  const clock = el("span", "clock", "");
+  stage.append(stageText, stageLine, document.createTextNode(" "), clock);
+  read.append(stage);
+  top.append(dial.root, read);
+  card.append(top);
+  run.append(head, card);
+  list.prepend(run);
+  while (list.children.length > KEEP_MESSAGES) list.lastChild.remove();
+  dial.set(null, "hold");
+  return {
+    node: run, card, dial, read,
+    stage(text, time) { stageLine.textContent = text; clock.textContent = time; },
+    summary(score, band) {
+      sum.replaceChildren(el("span", null, score), el("small", null, band));
+      run.classList.add("done");
+    },
+    fail(message) {
+      dial.set(null);
+      stage.remove();
+      read.append(el("p", "err", message));
+      sum.replaceChildren(el("small", null, "Failed"));
+      run.classList.add("done");
+    },
+  };
+}
+
+/* ---------- answer rendering ---------- */
 function fmtSeconds(x) {
   if (x == null) return "n/a";
   return x < 1 ? `${Math.max(1, Math.round(x * 1000))} ms` : `${Number(x).toFixed(2)} s`;
+}
+function fmtCell(v) {
+  if (v == null) return "null";
+  if (typeof v === "number" && !Number.isInteger(v)) return String(+v.toFixed(4));
+  return String(v);
 }
 
 function resultTable(columns, rows, limit) {
@@ -165,7 +286,7 @@ function resultTable(columns, rows, limit) {
   const tb = el("tbody");
   for (const row of rows.slice(0, limit)) {
     const tr = el("tr");
-    for (const v of row) tr.append(v == null ? el("td", "null", "null") : el("td", null, String(v)));
+    for (const v of row) tr.append(v == null ? el("td", "null", "null") : el("td", null, fmtCell(v)));
     tb.append(tr);
   }
   t.append(tb);
@@ -177,6 +298,21 @@ function rowCount(n, capped, shown) {
   let s = capped ? `First ${n} rows (capped)` : `${n} ${n === 1 ? "row" : "rows"}`;
   if (n > shown) s += `, showing ${shown}`;
   return s;
+}
+
+/* The answer in one line: a single cell becomes the figure with its column; otherwise the row count. */
+function answerLine(r) {
+  if (r.error) return el("p", "err", r.error);
+  if (!r.rows) return el("p", "ans text", "No result.");
+  if (!r.rows.length) return el("p", "ans text", "No rows match.");
+  const cols = r.columns || [];
+  if (r.rows.length === 1 && r.rows[0].length === 1) {
+    const p = el("p", "ans");
+    p.append(el("b", null, fmtCell(r.rows[0][0])), el("span", null, cols[0] || ""));
+    return p;
+  }
+  const p = el("p", "ans text", `${rowCount(r.rows.length, r.rows_capped, r.rows.length)}, ${cols.length} ${cols.length === 1 ? "column" : "columns"}`);
+  return p;
 }
 
 /* SQL tokens: whitespace, quoted strings/identifiers, words, numbers, two-char operators, any other char. */
@@ -234,11 +370,30 @@ function sqlBlock(sql, other) {
   return pre;
 }
 
+/* Two lines of SQL until tapped; the whole block is always one tap away. */
+function collapsible(pre) {
+  const box = el("div", "sqlbox clamped");
+  box.setAttribute("role", "button");
+  box.tabIndex = 0;
+  box.setAttribute("aria-expanded", "false");
+  const more = el("span", "more", "Show all SQL");
+  box.append(pre, more);
+  const toggle = () => {
+    const open = box.classList.toggle("clamped");
+    box.setAttribute("aria-expanded", String(!open));
+    more.textContent = open ? "Show all SQL" : "Show less";
+  };
+  box.addEventListener("click", (e) => { if (!getSelection().toString()) { e.stopPropagation(); toggle(); } });
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+  requestAnimationFrame(() => { if (pre.scrollHeight <= pre.clientHeight + 2) { box.classList.remove("clamped"); more.remove(); box.removeAttribute("role"); box.tabIndex = -1; } });
+  return box;
+}
+
 const normSql = (s) => (s || "").replace(/\s+/g, " ").trim().replace(/;$/, "").toLowerCase();
 
 function renderReadings(r) {
   const list = r.readings;
-  const sec = el("section", "perf readings");
+  const sec = el("section", "readings");
   sec.append(el("h2", null, "Two readings"));
   sec.append(el("p", null, "Samples disagree on the result."));
   const cards = [];
@@ -248,12 +403,12 @@ function renderReadings(r) {
     const head = el("div", "rhead");
     const name = el("div", "rname", `Reading ${rd.label}`);
     if (rd.share != null) name.append(el("span", null, `${Math.round(rd.share * 100)}% of samples`));
-    const btn = el("button", "choose", `Choose ${rd.label}`);
+    const btn = el("button", "choose outline", `Choose ${rd.label}`);
     btn.type = "button";
     head.append(name, btn, el("span", "picked", "Chosen"));
     card.append(head);
     const body = el("div", "rbody");
-    body.append(sqlBlock(rd.sql, other ? other.sql : null));
+    body.append(collapsible(sqlBlock(rd.sql, other ? other.sql : null)));
     if (rd.error) body.append(el("p", "err", rd.error));
     else if (rd.rows) {
       if (rd.rows.length) body.append(resultTable(rd.columns, rd.rows, PREVIEW_ROWS));
@@ -276,54 +431,93 @@ function renderReadings(r) {
   return sec;
 }
 
-function renderPass(r) {
-  const pass = el("article", "pass");
-  const hasReadings = Array.isArray(r.readings) && r.readings.length >= 2;
+/* ---------- why: the logistic regression behind the needle ---------- */
+const sgn = (x, d) => (x < 0 ? "−" : "+") + Math.abs(x).toFixed(d);
+const neg = (x, d) => (x < 0 ? "−" : "") + Math.abs(x).toFixed(d);
+const fmtInt = (n) => Number(n).toLocaleString("en-US");
+function termLabel(name, ex) {
+  const d = ex.d != null ? fmtInt(ex.d) : "[TBD]";
+  const L = ex.layer != null ? ex.layer : "[TBD]";
+  return {
+    probe: `Internals (layer ${L})`,
+    logprob_mean: "Mean token log-prob of the SQL",
+    logprob_min: "Lowest token log-prob",
+    question_chars: "Question length (characters)",
+    sql_chars: "SQL length (characters)",
+    n_joins: "Joins",
+    n_aggregates: "Aggregates",
+    n_subqueries: "Subqueries",
+    n_prompt: "Prompt tokens",
+    n_gen: "Generated tokens",
+    executes: "Compiles and runs",
+  }[name] || name;
+}
+const GROUP_ORDER = ["Internals", "Token confidence", "Size", "Compiles"];
+const GROUP_OF = { probe: "Internals", logprob_mean: "Token confidence", logprob_min: "Token confidence", executes: "Compiles" };
+const groupOf = (t) => t.group || GROUP_OF[t.name] || "Size";
 
-  const head = el("section");
-  head.append(el("p", "q", r.question));
-  head.append(el("p", "route", `${r.db_id} · local${r.fake ? " · fake worker" : ""}${r.mock ? " · mock fixture" : ""}`));
-  pass.append(head);
-
-  // The greedy SQL is always shown, except when it is identical to one of the readings shown below.
-  const greedyShown = hasReadings && r.readings.some((rd) => normSql(rd.sql) === normSql(r.sql));
-  if (!greedyShown) {
-    const body = el("section", "perf");
-    if (hasReadings) body.append(el("p", "tag", "Greedy SQL"));
-    body.append(r.audit && r.audit.flagged && r.sql ? hlBlock(r.sql, r.audit.highlights) : sqlBlock(r.sql, null));
-    if (r.error) {
-      body.append(el("p", "err", r.error));
-    } else if (r.rows) {
-      if (r.rows.length) body.append(resultTable(r.columns, r.rows, SHOW_ROWS));
-      body.append(el("p", "count", rowCount(r.rows.length, r.rows_capped, SHOW_ROWS)));
-    }
-    pass.append(body);
+/* Four signed bars (the stack's groups) and the sum; every weight behind a second tap. */
+function renderWhy(r) {
+  const ex = r.explain;
+  if (!ex || ex.needle == null) return null;
+  const det = el("details", "why");
+  const sum = el("summary", null, `Why ${ex.needle.toFixed(2)}`);
+  sum.append(el("span", null, "Logistic regression"));
+  det.append(sum);
+  const terms = Array.isArray(ex.stack_terms) && ex.stack_terms.length ? ex.stack_terms : null;
+  const baseline = ex.intercept != null ? ex.intercept : ex.stack_ref;
+  let groups;
+  if (terms) {
+    const acc = {};
+    for (const t of terms) acc[groupOf(t)] = (acc[groupOf(t)] || 0) + t.contribution;
+    groups = GROUP_ORDER.filter((g) => g in acc).map((g) => ({ name: g, value: acc[g] }));
+  } else {
+    groups = (ex.groups || []).map((g) => ({ name: g.name, value: g.value }));
   }
-  if (hasReadings) pass.append(renderReadings(r));
-  if (r.audit && r.audit.flagged) pass.append(renderAudit(r.audit));
-
-  const foot = el("section", "perf");
-  const dl = el("dl", "facts");
-  const nd = needleOf(r);
-  const facts = [
-    ["Confidence", nd == null ? "--" : nd.toFixed(2)],
-    ["Generation", fmtSeconds(r.gen_seconds)],
-    ["Execution", fmtSeconds(r.exec_seconds)],
-  ];
-  if (hasReadings && r.readings_seconds != null) facts.push(["Readings", fmtSeconds(r.readings_seconds)]);
-  if (r.audit) facts.push(["Fan-out check", auditFact(r.audit)]);
-  facts.push(["Tokens", r.n_prompt ? `${r.n_prompt} in · ${r.n_gen} out` : "n/a"], ["Sent", "0 bytes · local"]);
-  for (const [k, v] of facts) {
-    const pair = el("div");
-    pair.append(el("dt", null, k), el("dd", null, v));
-    dl.append(pair);
+  const label = (g) => (g === "Internals" ? termLabel("probe", ex) : g);
+  const maxAbs = Math.max(1e-9, ...groups.map((g) => Math.abs(g.value)));
+  const ul = el("ul", "terms");
+  for (const g of groups) {
+    const li = el("li");
+    li.append(el("span", "n", label(g.name)), el("span", "c " + (g.value >= 0 ? "up" : "down"), sgn(g.value, 2)));
+    const track = el("span", "track");
+    const bar = el("i", g.value >= 0 ? "up" : "down");
+    const w = (Math.abs(g.value) / maxAbs) * 50;
+    bar.style.left = (g.value >= 0 ? 50 : 50 - w) + "%";
+    bar.style.width = w + "%";
+    const zero = el("em");
+    zero.style.left = "50%";
+    track.append(bar, zero);
+    li.append(track);
+    ul.append(li);
   }
-  foot.append(dl);
-  pass.append(foot);
+  if (baseline != null) {
+    const li = el("li", "base");
+    li.append(el("span", "n", "Baseline"), el("span", "c", sgn(baseline, 2)));
+    ul.append(li);
+  }
+  const tot = el("li", "sum");
+  tot.append(el("span", "n", "Sum"), el("span", "c", `${neg(ex.logit, 2)} → ${ex.needle.toFixed(2)}`));
+  ul.append(tot);
+  det.append(ul);
 
-  const list = $("passes");
-  list.prepend(pass);
-  while (list.children.length > KEEP_PASSES) list.lastChild.remove();
+  const all = el("details", "weights");
+  all.append(el("summary", null, "All weights"));
+  const table = el("table");
+  const head = el("tr");
+  head.append(el("th", null, "Input"), el("th", null, terms ? "Weight" : ""), el("th", null, "Contribution"));
+  table.append(head);
+  const row = (name, weight, contribution) => {
+    const tr = el("tr");
+    tr.append(el("td", null, name), el("td", "w", weight), el("td", "w " + (contribution >= 0 ? "up" : "down"), sgn(contribution, 2)));
+    table.append(tr);
+  };
+  if (baseline != null) row("Baseline", "", baseline);
+  for (const t of terms || ex.features || []) row(termLabel(t.name, ex), terms ? neg(t.weight, 2) : "", terms ? t.contribution : t.contrib);
+  all.append(table);
+  det.append(all);
+  if (ex.synthetic) det.append(el("p", "err", "Synthetic test probe: random weights, not evidence."));
+  return det;
 }
 
 /* Worker sends probe as {needle, probe, calibrated, ...} or null. The needle is the stacked score. */
@@ -331,6 +525,51 @@ function needleOf(r) {
   if (r.probe == null) return null;
   const v = typeof r.probe === "object" ? Number(r.probe.needle) : Number(r.probe);
   return Number.isFinite(v) ? v : null;
+}
+
+/* Fill a reply card with the answer: reading, answer line, table, SQL, why, readings, audit. */
+function fillReply(card, r, secs) {
+  const nd = needleOf(r);
+  const hasReadings = Array.isArray(r.readings) && r.readings.length >= 2;
+  const read = card.read;
+  read.replaceChildren();
+  if (nd == null) {
+    read.append(el("span", "bandname", "No probe"), el("b", null, "--"));
+    card.summary("--", "No probe");
+  } else {
+    const b = bandOf(clamp01(nd));
+    const name = el("span", "bandname", b.name);
+    name.style.color = `var(--${b.key})`;
+    read.append(name, el("b", null, clamp01(nd).toFixed(2)));
+    card.summary(clamp01(nd).toFixed(2), b.name);
+  }
+  const meta = el("span", "meta");
+  const took = secs != null ? `${secs} s` : fmtSeconds(r.gen_seconds);
+  meta.append(el("span", null, `Local · ${took} · 0 bytes sent`));
+  if (r.audit && r.audit.flagged) meta.append(el("span", null, `Double counting, ${fmtFactor(r.audit.findings[0].factor)}× rows`));
+  if (r.fake) meta.append(el("span", null, "Fake worker"));
+  if (r.mock) meta.append(el("span", null, "Mock fixture"));
+  read.append(meta);
+  card.dial.set(nd, "noprobe");
+
+  const greedyShown = hasReadings && r.readings.some((rd) => normSql(rd.sql) === normSql(r.sql));
+  const body = el("section");
+  if (!greedyShown) {
+    body.append(answerLine(r));
+    if (!r.error && r.rows && r.rows.length && !(r.rows.length === 1 && r.rows[0].length === 1)) {
+      body.append(resultTable(r.columns, r.rows, PREVIEW_ROWS));
+      body.append(el("p", "count", rowCount(r.rows.length, r.rows_capped, Math.min(PREVIEW_ROWS, r.rows.length))));
+    }
+    const sqlNode = r.audit && r.audit.flagged && r.sql ? hlBlock(r.sql, r.audit.highlights) : sqlBlock(r.sql, null);
+    const box = collapsible(sqlNode);
+    box.style.marginTop = "10px";
+    body.append(box);
+  }
+  const why = renderWhy(r);
+  if (why) { why.style.marginTop = greedyShown ? "0" : "12px"; body.append(why); }
+  if (body.children.length) card.card.append(body);
+  if (hasReadings) card.card.append(renderReadings(r));
+  if (r.audit && r.audit.flagged) card.card.append(renderAudit(r.audit));
 }
 
 /* ---------- socket ---------- */
@@ -344,31 +583,30 @@ function onMessage(ev) {
     else warmT0 = null;
     syncAsk();
     if (m.warming || pending) startClock();
-    else if (was) { setStatus("Model ready"); announce("Model ready."); }
+    else if (was) { setStatus("Model ready"); announce("Model ready."); setTimeout(() => { if (!pending && !warming()) setStatus(""); }, 4000); }
   } else if (m.type === "welcome") {
     if (pending && m.job_id == null && !m.replay) {
       // The laptop has no record of it (restarted, or the question waited too long without this phone).
+      const card = pending.card;
       pending = null;
       stopClock();
       syncAsk();
-      setGauge(null);
-      setStatus("The laptop lost this question. Ask again.");
+      if (card) card.fail("The laptop lost this question. Ask again.");
       announce("Question lost. Ask again.");
     } else if (pending && m.job_id != null) {
       pending.phase = "sent";
       pending.job_id = m.job_id;
     } else if (!pending && m.job_id != null) {
-      // Page reloaded while a question was in flight: pick it back up.
-      pending = { question: "", db_id: "", t0: performance.now(), phase: "sent", job_id: m.job_id };
+      // Page reloaded while a question was in flight: pick it back up (the laptop keeps the question text).
+      pending = { question: "", db_id: "", t0: performance.now(), phase: "sent", job_id: m.job_id, card: newRun("Test flight in progress", "") };
       syncAsk();
-      setGauge(null, "hold");
       startClock();
     }
   } else if (m.type === "queued") {
     if (pending) {
       pending.phase = "queued";
       pending.job_id = m.job_id;
-      pending.queueText = m.position <= 1 ? "Next in line" : `Queued · ${m.position - 1} ahead`;
+      pending.queueText = m.position <= 1 ? "Next in line" : `Queued, ${m.position - 1} ahead`;
       startClock();
       announce(pending.queueText);
     }
@@ -380,7 +618,6 @@ function onMessage(ev) {
       if (m.type === "stage") pending.stage = m.stage;
       if (fresh) {
         pending.t0 = performance.now() - (m.elapsed || 0) * 1000;
-        setGauge(null, "hold");
         announce("Awaiting probe.");
       }
       startClock();
@@ -389,15 +626,14 @@ function onMessage(ev) {
     if (m.job_id != null && m.job_id === lastJob) return; // already rendered (replay after a reconnect)
     if (m.job_id != null) { lastJob = m.job_id; store.set("altimeter.lastJob", String(m.job_id)); }
     const secs = pending && pending.phase === "working" ? ((performance.now() - pending.t0) / 1000).toFixed(1) : null;
+    const card = (pending && pending.card) || newRun(m.question || "Test flight", m.db_id || "");
     pending = null;
     stopClock();
-    busy(false);
+    syncAsk();
+    setStatus("");
+    fillReply(card, m, secs);
     const nd = needleOf(m);
-    setGauge(nd, "noprobe");
-    const took = secs == null ? "Answered" : `Answered in ${secs} s`;
-    setStatus(nd == null ? `${took} · probe not loaded` : took);
-    renderPass(m);
-    let say = nd == null ? "Answer ready. No probe score." : `Confidence ${nd.toFixed(2)}, ${bandOf(Math.min(1, Math.max(0, nd))).name}.`;
+    let say = nd == null ? "Answer ready. No probe score." : `Confidence ${nd.toFixed(2)}, ${bandOf(clamp01(nd)).name}.`;
     if (m.error) say += " The query failed.";
     if (Array.isArray(m.readings) && m.readings.length >= 2) say += " Two readings, choose one.";
     announce(say);
@@ -407,18 +643,19 @@ function onMessage(ev) {
       lastJob = m.job_id;
       store.set("altimeter.lastJob", String(m.job_id));
     }
+    const card = pending && pending.card;
     pending = null;
     stopClock();
-    busy(false);
-    setGauge(null);
-    setStatus(m.message);
+    syncAsk();
+    if (card) card.fail(m.message);
+    else setStatus(m.message, "", true);
     announce(m.message);
   }
 }
 
 function setLink(up) {
   $("radio").classList.toggle("on", !up);
-  $("link").textContent = up ? "On local radio" : "No link";
+  $("link").textContent = up ? "Local link" : "No link";
   $("link").classList.toggle("down", !up);
 }
 
@@ -467,24 +704,32 @@ function fmtFactor(x) {
 }
 
 function auditFact(a) {
-  if (a.flagged) return `Flagged · ${fmtFactor(a.findings[0].factor)}× rows`;
+  if (a.flagged) return `Flagged, ${fmtFactor(a.findings[0].factor)}× rows`;
   if (!a.audited) return "No JOIN + aggregate";
   return a.audit_error ? "Incomplete" : "Clear";
 }
 
+/* How far off the as-written figure was: a multiple from 2x, a percentage below that (same rule as the table). */
+function ratioWords(ratio) {
+  const r = Number(ratio);
+  if (ratio == null || !Number.isFinite(r) || r <= 0 || r === 1) return null;
+  const hi = r > 1;
+  if (hi && r >= 2) return `${fmtFactor(r)}× too high`;
+  if (!hi && r <= 0.5) return `${fmtFactor(1 / r)}× too low`;
+  return `${Math.round(Math.abs(r - 1) * 100)}% too ${hi ? "high" : "low"}`;
+}
+
 /* Struck as-written figure, corrected figure, and how far off it was. Animates once when attached. */
-function ledger(h, source) {
+function ledger(h) {
   const box = el("div", "ledger");
   if (Math.max(h.before_text.length, h.after_text.length) > 6) box.classList.add("long");
   const was = el("div", "col");
   was.append(el("span", "lab", "As written"), el("span", "fig was", h.before_text));
   const now = el("div", "col");
-  now.append(el("span", "lab", source === "auditor" ? "Deduplicated" : "Corrected"), el("span", "fig now", h.after_text));
+  now.append(el("span", "lab", "Corrected"), el("span", "fig now", h.after_text));
   box.append(was, now);
-  if (h.ratio != null && h.ratio !== 1) {
-    const hi = h.ratio > 1;
-    box.append(el("span", "times", `${fmtFactor(hi ? h.ratio : 1 / h.ratio)}× too ${hi ? "high" : "low"}`));
-  }
+  const rw = ratioWords(h.ratio);
+  if (rw) box.append(el("span", "times", rw));
   box.append(el("span", "what", h.row ? `${h.column} for ${h.row}` : h.column));
   requestAnimationFrame(() => requestAnimationFrame(() => box.classList.add("go")));
   return box;
@@ -492,7 +737,7 @@ function ledger(h, source) {
 
 function rewriteBlock(c) {
   const det = el("details", "rewrite");
-  det.append(el("summary", null, c.source === "auditor" ? "Suggested rewrite (auditor)" : "Corrected query (written by hand, verified by direct counts)"));
+  det.append(el("summary", null, c.source === "auditor" ? "Corrected SQL (auditor rewrite)" : "Corrected SQL (hand-written, checked against the raw tables)"));
   det.append(sqlBlock(c.sql, null));
   if (c.error) det.append(el("p", "err", c.error));
   else if (c.rows) {
@@ -506,7 +751,7 @@ function rewriteBlock(c) {
    and if that fails too, open the rewrite and select its SQL for the phone's own Copy menu. */
 function copyFixButton(c, det) {
   const row = el("div", "fixrow");
-  const btn = el("button", "copy", "Copy fixed SQL");
+  const btn = el("button", "copy outline", "Copy corrected SQL");
   btn.type = "button";
   const said = el("span", "copied");
   said.setAttribute("aria-live", "polite");
@@ -559,15 +804,15 @@ function fixParts(a) {
   return [nodes, det];
 }
 
-/* Audit block inside an Ask answer (only when flagged). */
+/* Audit block inside an answer (only when flagged). */
 function renderAudit(a) {
-  const sec = el("section", "perf audit");
+  const sec = el("section", "audit");
   sec.append(el("h2", null, "Double counting"));
-  if (a.headline && a.corrected) sec.append(ledger(a.headline, a.corrected.source));
+  if (a.headline && a.corrected) sec.append(ledger(a.headline));
   const [nodes, det] = fixParts(a);
   sec.append(...nodes);
   if (det) sec.append(det);
-  else sec.append(el("p", "note", "No automatic rewrite for this query shape."));
+  else sec.append(el("p", "note", "No automatic rewrite for this query."));
   return sec;
 }
 
@@ -587,14 +832,14 @@ function renderCheck(d) {
   let kind, title, sub;
   if (o.error) { kind = "error"; title = "Query does not run"; sub = o.error; }
   else if (d.flagged) { kind = "flagged"; title = "Double counting"; sub = d.db_id; }
-  else if (!d.audited) { kind = "clear"; title = "Nothing to audit"; sub = "No JOIN with SUM, AVG or COUNT. This check looks only for double counting."; }
+  else if (!d.audited) { kind = "clear"; title = "Nothing to check"; sub = "No JOIN feeds a SUM, AVG or COUNT, so nothing can be double counted."; }
   else if (d.audit_error) { kind = "error"; title = "Audit incomplete"; sub = d.audit_error; }
-  else { kind = "clear"; title = "No double counting found"; sub = "The JOINs do not repeat any counted row. Other mistakes are not checked here."; }
+  else { kind = "clear"; title = "No double counting found"; sub = "No JOIN repeats a counted row. Other mistakes are not checked."; }
   const top = el("section", "v-" + kind);
   const vh = el("div", "verdict");
   vh.append(el("h3", null, title), el("p", null, sub));
   top.append(vh);
-  if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline, d.corrected.source));
+  if (d.flagged && d.headline && d.corrected) top.append(ledger(d.headline));
   let det = null;
   if (d.flagged) {
     const [nodes, rw] = fixParts(d);
@@ -605,7 +850,7 @@ function renderCheck(d) {
 
   const items = [];
   const nrows = o.rows ? o.rows.length : 0;
-  items.push([`Runs on ${d.db_id}`, o.error ? "No" : `${rowCount(nrows, o.rows_capped, nrows)} · ${fmtSeconds(o.seconds)}`, o.error ? "bad" : null]);
+  items.push([`Runs on ${d.db_id}`, o.error ? "No" : `${rowCount(nrows, o.rows_capped, nrows)}, ${fmtSeconds(o.seconds)}`, o.error ? "bad" : null]);
   if (!o.error) items.push(["JOIN with SUM, AVG or COUNT", d.audited ? "Present" : "None", null]);
   if (d.audited) {
     const f = d.findings[0];
@@ -614,19 +859,19 @@ function renderCheck(d) {
   }
   if (d.flagged) {
     const c = d.corrected;
-    items.push(["Corrected query", !c ? "None for this shape" : c.error ? "Fails" : c.source === "auditor" ? "Auditor rewrite runs" : "Hand fix runs",
-      c && !c.error ? "ok" : null]);
+    items.push(["Corrected query", !c ? "None" : c.error ? "Does not run" : c.source === "auditor" ? "Runs (auditor rewrite)" : "Runs (hand-written)",
+      c && !c.error ? "ok" : c ? "bad" : null]);
   }
   items.push(["Check time", fmtSeconds(d.audit_seconds), null]);
-  const cl = el("section", "perf");
+  const cl = el("section");
   cl.append(checklist(items));
   sheet.append(cl);
 
-  const body = el("section", "perf");
+  const body = el("section");
   body.append(el("p", "tag", "SQL as written"));
   body.append(d.flagged ? hlBlock(d.sql, d.highlights) : sqlBlock(d.sql, null));
   if (d.flagged && d.highlights && d.highlights.length) {
-    body.append(el("p", "note", "Red: the aggregate that counts repeated rows. Yellow: the JOINs in the same query block."));
+    body.append(el("p", "note", "Red: the aggregate. Yellow: the JOINs that repeat its rows."));
   }
   if (!o.error && o.rows) {
     if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
@@ -635,6 +880,7 @@ function renderCheck(d) {
   if (det) body.append(det);
   sheet.append(body);
   $("checkOut").replaceChildren(sheet);
+  requestAnimationFrame(() => sheet.scrollIntoView({ block: "start", behavior: smoothScroll() }));
 }
 
 function renderPresets() {
@@ -644,15 +890,17 @@ function renderPresets() {
     const b = el("button");
     b.type = "button";
     b.setAttribute("aria-pressed", String(activePreset === p.id));
-    b.append(el("span", "pq", p.question), el("span", "ps", p.label), el("span", "pd", p.db_id));
+    const ps = el("span", "ps", p.label);
+    ps.append(el("span", null, ` · ${p.db_id}`));
+    b.append(el("span", "pq", p.question), ps);
     b.addEventListener("click", () => {
       activePreset = p.id;
       $("checkDb").value = p.db_id;
       $("sql").value = p.sql;
       renderPresets();
       $("checkOut").replaceChildren();
-      $("checkStatus").textContent = "";
-      $("run").scrollIntoView({ block: "end", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      setCheckStatus("");
+      $("run").scrollIntoView({ block: "end", behavior: smoothScroll() });
     });
     li.append(b);
     return li;
@@ -668,6 +916,11 @@ async function loadPresets() {
   } catch { presets = []; renderPresets(); }
 }
 
+function setCheckStatus(text, clock) {
+  $("checkText").textContent = text;
+  $("checkClock").textContent = clock || "";
+}
+
 function checkBusy(on) {
   $("run").disabled = on;
   $("run").textContent = on ? "Checking" : "Run pre-flight check";
@@ -675,7 +928,7 @@ function checkBusy(on) {
   checking = null;
   if (on) {
     checking = { t0: performance.now() };
-    const draw = () => { $("checkStatus").textContent = `Running the query and the fan-out audit · ${((performance.now() - checking.t0) / 1000).toFixed(1)} s`; };
+    const draw = () => setCheckStatus("Running the query and counting its JOINs", `${((performance.now() - checking.t0) / 1000).toFixed(1)} s`);
     draw();
     checking.timer = setInterval(draw, 100);
   }
@@ -694,27 +947,27 @@ async function runCheck(e) {
   try {
     const r = await apiCall("/api/check", body);
     checkBusy(false);
-    if (!r.ok) { $("checkStatus").textContent = r.data.error || `Check failed (HTTP ${r.status}).`; $("checkOut").replaceChildren(); return; }
-    $("checkStatus").textContent = `Checked in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    if (!r.ok) { setCheckStatus(r.data.error || `Check failed (HTTP ${r.status}).`); $("checkOut").replaceChildren(); return; }
+    setCheckStatus("Checked", `${((performance.now() - t0) / 1000).toFixed(1)} s`);
     renderCheck(r.data);
     const d = r.data;
     announce(d.flagged ? `Double counting. ${d.explanation}` + (d.headline ? ` ${d.headline.before_text} becomes ${d.headline.after_text}.` : "")
       : d.original && d.original.error ? "The query does not run." : "No double counting found.");
   } catch {
     checkBusy(false);
-    $("checkStatus").textContent = "No link to the laptop. Check again when it reconnects.";
+    setCheckStatus("No link to the laptop. Try again once it reconnects.");
   }
 }
 
 function setMode(mode) {
-  const check = mode === "check";
-  document.body.classList.toggle("check", check);
-  $("tabAsk").setAttribute("aria-selected", String(!check));
-  $("tabCheck").setAttribute("aria-selected", String(check));
-  history.replaceState(null, "", location.pathname + location.search + (check ? "#check" : ""));
+  const test = mode === "test";
+  document.body.classList.toggle("test", test);
+  $("tabTest").setAttribute("aria-selected", String(test));
+  $("tabCheck").setAttribute("aria-selected", String(!test));
+  history.replaceState(null, "", location.pathname + location.search + (test ? "#test" : ""));
 }
 
-$("tabAsk").addEventListener("click", () => setMode("ask"));
+$("tabTest").addEventListener("click", () => setMode("test"));
 $("tabCheck").addEventListener("click", () => setMode("check"));
 $("checkForm").addEventListener("submit", runCheck);
 $("sql").addEventListener("input", () => {
@@ -722,15 +975,16 @@ $("sql").addEventListener("input", () => {
   if (p && normSql($("sql").value) !== normSql(p.sql)) { activePreset = null; renderPresets(); }
 });
 
-/* ---------- form ---------- */
+/* ---------- test flight form ---------- */
 function fillDbs(dbs) {
   const sel = $("db");
   sel.replaceChildren(...dbs.map((d) => { const o = el("option", null, d); o.value = d; return o; }));
-  const saved = (() => { try { return localStorage.getItem("altimeter.db"); } catch { return null; } })();
+  const saved = store.get("altimeter.db");
   if (saved && dbs.includes(saved)) sel.value = saved;
   else if (dbs.includes("formula_1")) sel.value = "formula_1";
   $("checkDb").replaceChildren(...dbs.map((d) => { const o = el("option", null, d); o.value = d; return o; }));
   $("checkDb").value = dbs.includes("codebase_community") ? "codebase_community" : sel.value;
+  renderSuggestions(dbs);
 }
 
 async function loadDbs() {
@@ -738,7 +992,7 @@ async function loadDbs() {
     const r = await fetch("/api/dbs", { cache: "no-store" });
     fillDbs((await r.json()).dbs);
   } catch {
-    setStatus("Could not load the database list.");
+    setStatus("Could not load the database list.", "", true);
   }
 }
 
@@ -747,24 +1001,23 @@ function submit(e) {
   const question = $("question").value.trim();
   const db_id = $("db").value;
   if (!question || !db_id || pending || warming()) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop yet."); connect(); return; }
-  try { localStorage.setItem("altimeter.db", db_id); } catch { /* storage unavailable */ }
-  pending = { question, db_id, t0: performance.now(), phase: "sent" };
-  busy(true);
-  setGauge(null, "hold");
-  setStatus("Sent");
+  if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus("No link to the laptop yet.", "", true); connect(); return; }
+  store.set("altimeter.db", db_id);
+  pending = { question, db_id, t0: performance.now(), phase: "sent", card: newRun(question, db_id) };
+  syncAsk();
+  setStatus("");
+  pending.card.stage("Sent", "");
+  pending.card.node.scrollIntoView({ block: "nearest", behavior: smoothScroll() });
   announce("Question sent.");
   ws.send(JSON.stringify({ db_id, question }));
 }
 
-$("form").addEventListener("submit", submit);
+$("flight").addEventListener("submit", submit);
 $("question").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("form").requestSubmit(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("flight").requestSubmit(); }
 });
 
-buildTape();
-setGauge(null);
-setMode(location.hash === "#check" ? "check" : "ask");
+setMode(location.hash === "#test" ? "test" : "check");
 if (MOCK) {
   const s = document.createElement("script");
   s.src = "mock.js";

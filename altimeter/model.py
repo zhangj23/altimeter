@@ -11,7 +11,8 @@ from dataclasses import dataclass
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StoppingCriteria,
+                          StoppingCriteriaList)
 
 from .prompting import extract_sql
 
@@ -36,6 +37,17 @@ class Generation:
     hs_mean_gen: torch.Tensor
     token_logprobs: list[float]
     tokens: list[str]
+
+
+class FenceStop(StoppingCriteria):
+    """True once the generated text holds a closed ``` block (an opening and a closing fence)."""
+
+    def __init__(self, tok, n_in: int) -> None:
+        self.tok, self.n_in = tok, n_in
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+        done = [self.tok.decode(row[self.n_in:], skip_special_tokens=True).count("```") >= 2 for row in input_ids]
+        return torch.tensor(done, dtype=torch.bool, device=input_ids.device)
 
 
 class SqlModel:
@@ -63,9 +75,19 @@ class SqlModel:
         return self.tok(text, return_tensors="pt").input_ids.to(self.device)
 
     @torch.no_grad()
-    def generate(self, messages: list[dict[str, str]], max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> Generation:
+    def generate(self, messages: list[dict[str, str]], max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+                 features: str | None = None, stop_at_fence: bool | None = None) -> Generation:
+        """Greedy SQL + features. features="cached" (default; ALTIMETER_FEATURES) reuses generate()'s prompt KV
+        cache, so the feature pass runs over 1 + n_gen tokens instead of re-reading the whole prompt;
+        "full" is the original single forward over prompt + SQL (what the labeling box used). Decoding is the
+        same call either way, so the SQL does not depend on this setting. stop_at_fence (ALTIMETER_STOP_FENCE=1)
+        ends decoding at the closing ``` of the first sql block."""
+        features = features or os.environ.get("ALTIMETER_FEATURES", "cached")
+        if stop_at_fence is None:
+            stop_at_fence = os.environ.get("ALTIMETER_STOP_FENCE", "0") == "1"
         ids = self.prompt_ids(messages)
         n_in = ids.shape[1]
+        cached = features == "cached"
         t0 = time.time()
         out = self.model.generate(
             input_ids=ids,
@@ -73,14 +95,40 @@ class SqlModel:
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
+            return_dict_in_generate=cached,
+            stopping_criteria=StoppingCriteriaList([FenceStop(self.tok, n_in)]) if stop_at_fence else None,
         )
         gen_seconds = time.time() - t0
-        gen = out[0, n_in:].tolist()
+        seqs = out.sequences if cached else out
+        gen = seqs[0, n_in:].tolist()
         while gen and gen[-1] in self.stop_ids:
             gen.pop()
         if not gen:  # degenerate: model stopped immediately
-            gen = out[0, n_in : n_in + 1].tolist()
+            gen = seqs[0, n_in : n_in + 1].tolist()
+        if cached and getattr(out, "past_key_values", None) is not None:
+            return self._features_cached(ids, gen, gen_seconds, out.past_key_values)
         return self._features(ids, gen, gen_seconds)
+
+    def _features_cached(self, ids: torch.Tensor, gen: list[int], gen_seconds: float, cache) -> Generation:
+        """Same features as _features(), but the prompt (minus its last token) comes from generate()'s KV cache.
+        Forward [last prompt token] + gen: hidden state 0 is the last prompt token, 1.. are the SQL tokens."""
+        n_in = ids.shape[1]
+        n_gen = len(gen)
+        t1 = time.time()
+        extra = cache.get_seq_length() - (n_in - 1)  # cache holds prompt + all but the last generated token
+        if extra > 0:
+            cache.crop(-extra)  # negative = drop that many tokens (works on old and new transformers)
+        tail = torch.tensor([[int(ids[0, -1])] + gen], device=self.device)
+        pos = torch.arange(n_in - 1, n_in + n_gen, device=self.device)
+        fw = self.model(tail, past_key_values=cache, use_cache=True, output_hidden_states=True,
+                        attention_mask=torch.ones(1, n_in + n_gen, dtype=torch.long, device=self.device),
+                        position_ids=pos[None], cache_position=pos)
+        logits = fw.logits[0, :-1].float()  # position j predicts gen[j]
+        lp = torch.log_softmax(logits, dim=-1).gather(1, torch.tensor(gen, device=self.device)[:, None])[:, 0]
+        hs = torch.stack([h[0] for h in fw.hidden_states])  # (L+1, 1 + n_gen, d)
+        feats = (hs[:, 0].half().cpu(), hs[:, -1].half().cpu(), hs[:, 1:].float().mean(dim=1).half().cpu())
+        del fw, hs, cache
+        return self._pack(gen, n_in, lp, feats, gen_seconds, time.time() - t1)
 
     @torch.no_grad()
     def score_given(self, messages: list[dict[str, str]], sql: str, raw: str | None = None) -> Generation:
@@ -110,8 +158,11 @@ class SqlModel:
             hs[:, n_in:].float().mean(dim=1).half().cpu(),
         )
         del fw, hs
-        feat_seconds = time.time() - t1
+        return self._pack(gen, n_in, lp, feats, gen_seconds, time.time() - t1)
 
+    def _pack(self, gen: list[int], n_in: int, lp: torch.Tensor, feats: tuple, gen_seconds: float,
+              feat_seconds: float) -> Generation:
+        n_gen = len(gen)
         raw = self.tok.decode(gen, skip_special_tokens=True)
         lp_list = lp.cpu().tolist()
         return Generation(

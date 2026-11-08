@@ -28,7 +28,7 @@ from .worker import db_path, list_dbs
 
 MAX_ROWS = 200
 EXEC_TIMEOUT_S = 5.0
-CHECK_AUDIT_TIMEOUT_S = 15.0  # explicit check: big CTE queries (BIRD q140) need ~2-5 s
+CHECK_AUDIT_TIMEOUT_S = 15.0  # explicit Pre-flight check: room for auditor v2 result verification
 ANSWER_AUDIT_TIMEOUT_S = 5.0
 MAX_SQL_CHARS = 20_000
 
@@ -206,8 +206,36 @@ _Q205_FIX = (_Q205
 _Q89 = ("SELECT COUNT(T2.account_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id "
         "WHERE T1.A3 = 'east Bohemia' AND T2.frequency = 'POPLATEK PO OBRATU'")
 
-# Current-release bugs first. Labels name every release whose answer key contains the query.
+# Persona scenarios: the join an analyst or an AI typically writes for the question (cards/scenarios.json, verified).
+_CLUB_BUDGET = ("SELECT e.event_name, SUM(b.amount) AS total_budget, SUM(x.cost) AS total_spent\n"
+                "FROM event e JOIN budget b ON b.link_to_event = e.event_id JOIN expense x ON x.link_to_budget = b.budget_id\n"
+                "GROUP BY e.event_id ORDER BY e.event_date")
+_BANK_REGION_LOANS = ("SELECT d.A3 AS region, SUM(l.amount) AS total_loaned\n"
+                      "FROM loan l JOIN disp p ON l.account_id = p.account_id JOIN client c ON p.client_id = c.client_id\n"
+                      "JOIN district d ON c.district_id = d.district_id GROUP BY d.A3 ORDER BY total_loaned DESC")
+_CLINIC_CHOLESTEROL_AGE = ("SELECT\n  AVG(strftime('%Y', 'now') - strftime('%Y', T1.Birthday))\nFROM Patient AS T1\n"
+                           "JOIN Laboratory AS T2\n  ON T1.ID = T2.ID\nWHERE\n  T2.\"T-CHO\" > 250;")
+# Hand fixes from the same cards (verified against direct sums): each budget / loan row counted once.
+_CLUB_BUDGET_FIX = ("SELECT e.event_name, (SELECT SUM(amount) FROM budget b WHERE b.link_to_event = e.event_id) AS total_budget,\n"
+                    "(SELECT SUM(x.cost) FROM expense x JOIN budget b ON x.link_to_budget = b.budget_id WHERE b.link_to_event = e.event_id) AS total_spent\n"
+                    "FROM event e WHERE e.event_id IN (SELECT b.link_to_event FROM budget b JOIN expense x ON x.link_to_budget = b.budget_id) ORDER BY e.event_date")
+_BANK_REGION_LOANS_FIX = ("SELECT d.A3 AS region, SUM(l.amount) AS total_loaned FROM loan l JOIN disp p ON l.account_id = p.account_id AND p.type = 'OWNER'\n"
+                          "JOIN client c ON p.client_id = c.client_id JOIN district d ON c.district_id = d.district_id GROUP BY d.A3 ORDER BY total_loaned DESC")
+
+# Persona scenarios first, then current-release benchmark bugs (q197 is the benchmark hero).
+# Benchmark labels name every release whose answer key contains the query.
 PRESETS: list[dict[str, Any]] = [
+    {"id": "club_budget", "db_id": "student_club", "sql": _CLUB_BUDGET, "fix": _CLUB_BUDGET_FIX,
+     "label": "Club treasurer: budget vs spending per event",
+     "question": "For each event, what was the total budget and how much did we actually spend?",
+     # The story row: a $23.50 overspend that the inflated budget (355 vs 205) makes look $126.50 under budget.
+     "headline_row": "November Meeting"},
+    {"id": "bank_region_loans", "db_id": "financial", "sql": _BANK_REGION_LOANS, "fix": _BANK_REGION_LOANS_FIX,
+     "label": "Bank analyst: loan book by region",
+     "question": "What is the total amount loaned in each region?"},
+    {"id": "clinic_cholesterol_age", "db_id": "thrombosis_prediction", "sql": _CLINIC_CHOLESTEROL_AGE, "fix": None,
+     "label": "Clinic manager: age of the high-cholesterol group (SQL by Gemini)",
+     "question": "What is the average age of patients who have had a total cholesterol result above 250?"},
     {"id": "bird197", "db_id": "toxicology", "sql": _Q197, "fix": _Q197_FIX,
      "label": "BIRD dev answer key, question 197 (2024 and November 2025 releases)",
      "question": "Calculate the average number of oxygen atoms in single-bonded molecules."},
@@ -267,26 +295,49 @@ def fmt_num(v: Any) -> str:
     return s + "0" if s.endswith(".") else s
 
 
-def headline(orig: dict[str, Any], fixed: dict[str, Any] | None) -> dict[str, Any] | None:
-    """First numeric cell of the first row that differs between the original and corrected results."""
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def headline(orig: dict[str, Any], fixed: dict[str, Any] | None, prefer_row: str | None = None) -> dict[str, Any] | None:
+    """The numeric cell that differs most, relatively, between the original and corrected results.
+    Rows are aligned by their first column when it is a text key present on both sides, else by position.
+    The first row is the anchor: when any of its cells changed, the headline comes from it (it is the row the
+    preview shows first and the fan-out grid samples from); other rows are searched only when row 0 is unchanged.
+    prefer_row names a key whose row is taken whenever it has a changed cell (a preset's story row)."""
     if not fixed or not orig.get("rows") or not fixed.get("rows"):
         return None
-    a, b = orig["rows"][0], fixed["rows"][0]
-    if len(a) != len(b):
+    rows_a, rows_b = orig["rows"], fixed["rows"]
+    keyed = all(len(r) > 1 and isinstance(r[0], str) for r in rows_a + rows_b) \
+        and bool({r[0] for r in rows_a} & {r[0] for r in rows_b})
+    if keyed:
+        by_key: dict[str, list[Any]] = {}
+        for r in rows_b:
+            by_key.setdefault(r[0], r)
+        pairs = [(a, by_key[a[0]]) for a in rows_a if a[0] in by_key]
+    else:
+        pairs = list(zip(rows_a, rows_b))
+    best: tuple[float, int, Any, Any, str | None] | None = None
+    for n, (a, b) in enumerate(pairs):
+        if len(a) != len(b):
+            continue
+        label = a[0] if len(a) > 1 and isinstance(a[0], str) and a[0] == b[0] else None
+        for i, (x, y) in enumerate(zip(a, b)):
+            if not (_is_num(x) and _is_num(y)) or round(float(x), 4) == round(float(y), 4):
+                continue
+            rel = abs(float(x) - float(y)) / max(abs(float(x)), abs(float(y)))
+            score = rel + (10.0 if n == 0 else 0.0) + (20.0 if prefer_row is not None and label == prefer_row else 0.0)
+            if best is None or score > best[0] + 1e-12:
+                best = (score, i, x, y, label)
+    if best is None:
         return None
-    for i, (x, y) in enumerate(zip(a, b)):
-        num = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y))
-        if num and round(float(x), 4) != round(float(y), 4):
-            label = None
-            if len(a) > 1 and isinstance(a[0], str) and a[0] == b[0]:
-                label = a[0]  # row key, e.g. molecule TR041
-            ratio = float(x) / float(y) if y else None
-            return {"column": (orig.get("columns") or [None] * len(a))[i], "row": label,
-                    "before": x, "after": y, "before_text": fmt_num(x), "after_text": fmt_num(y),
-                    "ratio": round(ratio, 3) if ratio is not None else None,
-                    "ratio_text": (f"{ratio:.3g}" if ratio is not None else None),
-                    "single_cell": len(orig["rows"]) == 1 and len(a) == 1}
-    return None
+    _, i, x, y, label = best
+    ratio = float(x) / float(y) if y else None
+    return {"column": (orig.get("columns") or [None] * (i + 1))[i], "row": label,
+            "before": x, "after": y, "before_text": fmt_num(x), "after_text": fmt_num(y),
+            "ratio": round(ratio, 3) if ratio is not None else None,
+            "ratio_text": (f"{ratio:.3g}" if ratio is not None else None),
+            "single_cell": len(rows_a) == 1 and len(rows_a[0]) == 1}
 
 
 def _scopes(sql: str) -> list[tuple[exp.Select, list[tuple[str, str]]]]:
@@ -574,7 +625,7 @@ def intended_note(sql: str, findings: list[dict[str, Any]], has_fix: bool) -> st
     unit = f"{table} and {others[0]} pair" if len(others) == 1 else \
         f"{table}, " + ", ".join(others[:-1]) + f" and {others[-1]} combination"
     fix = "use the fix" if has_fix else f"aggregate {table} before the JOIN"
-    return f"If you meant to {verb} every {unit}, this is fine. If you meant to {verb} each {table} row once, {fix}."
+    return f"Fine if you meant to {verb} every {unit}. If you meant each {table} row once, {fix}."
 
 
 def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: float = CHECK_AUDIT_TIMEOUT_S,
@@ -595,7 +646,9 @@ def check(db_id: str, sql: str, preset: str | None = None, audit_timeout_s: floa
     sentence, spans = explain(sql, a.findings) if flagged and a else ("", [])
     findings = a.findings if a else []
     fan_err, fan_s = None, None
-    head = headline(orig, corrected) if corrected and not corrected.get("error") else None
+    same_preset = p is not None and p["db_id"] == db_id and _norm_sql(p["sql"]) == _norm_sql(sql)
+    head = headline(orig, corrected, p.get("headline_row") if same_preset else None) \
+        if corrected and not corrected.get("error") else None
     if grid and flagged and findings:
         t1 = time.time()
         fos, fan_err = fanouts(path, sql, findings, head.get("row") if head else None)

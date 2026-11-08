@@ -1,27 +1,49 @@
 "use strict";
 /* Dev-only fixture driver, loaded by app.js only when the URL has ?mock=1. Not a measured result:
-   every number here is made up for layout screenshots, and each pass is labeled "mock fixture".
-   ?mock=1                       control strip at the bottom of the page
-   ?mock=1&state=<name>          run one scenario on load, no strip (idle|warming|awaiting|stage|cruise|caution|ask|readings|audit)
+   every number here is made up for layout screenshots, and each reply is labeled "mock fixture".
+   ?mock=1                       control strip under the test-flight form
+   ?mock=1&state=<name>          run one scenario on load, no strip (idle|warming|awaiting|stage|cruise|caution|ask|readings|audit|error)
+   ?mock=1&state=a,b,c           run several in turn, each after the previous result (older runs collapse)
    &choose=A|B                   with state=readings, tap that reading after it renders
+   &why=1                        open the Why disclosure of the newest run once it renders
    ?mock=1&state=check|check-flagged|check-clear   Check mode. Its fixtures are copies of real /api/check output
-                                 (BIRD q571 and q89, captured from a local run); the probe numbers are still made up. */
+                                 (BIRD q571 and q89, captured from a local run); the probe numbers are still made up.
+   The explain breakdown is the shape of one real answer (formula_1, races in 2009, layer 26); the Internals row is
+   rescaled so the rows sum to each fixture's made-up needle. */
 (() => {
   const DB = "formula_1";
   const base = { db_id: DB, rows_capped: false, error: null, timed_out: false, gen_seconds: 2.41, exec_seconds: 0.012,
     n_prompt: 1840, n_gen: 38, logprob_mean: null, logprob_min: null, readings: null, readings_seconds: null, mock: true };
-  const probe = (needle) => ({ needle, probe: needle, calibrated: needle, layer: 19, position: "last_prompt", n_train: 0, cv_auroc: null });
+  const EX = {"layer":26,"position":"mean_gen","n_layers":36,"p_raw":0.9899,"p_cal":0.9021,"d":2048,"stack_ref":-1.0765,"logit":1.1844,"needle":0.7657,"ece":0.0213,"groups":[{"name":"Internals","value":0.7092},{"name":"Token confidence","value":-0.8691},{"name":"Size","value":0.9185},{"name":"Compiles","value":1.5024}],"features":[{"name":"probe","value":0.9899,"contrib":0.7092},{"name":"logprob_mean","value":-0.1502,"contrib":-1.0483},{"name":"logprob_min","value":-1.3135,"contrib":0.1791},{"name":"question_chars","value":33.0,"contrib":0.2141},{"name":"sql_chars","value":45.0,"contrib":0.3069},{"name":"n_joins","value":0.0,"contrib":-0.0663},{"name":"n_aggregates","value":1.0,"contrib":0.0153},{"name":"n_subqueries","value":0.0,"contrib":-0.0458},{"name":"n_prompt","value":3468.0,"contrib":-0.0474},{"name":"n_gen","value":18.0,"contrib":0.5416},{"name":"executes","value":1.0,"contrib":1.5024}]};
+  // Rescale the Internals row so the breakdown sums to this fixture's needle. terms=true also emits stack_terms
+  // (the per-input weights list the worker is adding), with made-up standardized values.
+  const explainFor = (needle, terms) => {
+    const logit = Math.log(needle / (1 - needle));
+    const others = EX.groups.filter((g) => g.name !== "Internals").reduce((s, g) => s + g.value, 0);
+    const internals = logit - EX.stack_ref - others;
+    const ex = { ...EX, logit, needle, groups: EX.groups.map((g) => (g.name === "Internals" ? { ...g, value: internals } : g)) };
+    ex.p_raw = needle;
+    ex.features = EX.features.map((f) => (f.name === "probe" ? { ...f, value: needle, contrib: internals } : f));
+    if (terms) {
+      const scaled = { probe: 1.31, logprob_mean: -0.42, logprob_min: 0.65, question_chars: -0.88, sql_chars: -0.71, n_joins: -0.55, n_aggregates: 0.3, n_subqueries: -0.2, n_prompt: 0.9, n_gen: -0.6, executes: 0.38 };
+      const group = { probe: "Internals", logprob_mean: "Token confidence", logprob_min: "Token confidence", executes: "Compiles" };
+      ex.intercept = EX.stack_ref;
+      ex.stack_terms = ex.features.map((f) => ({ name: f.name, group: group[f.name] || "Size", weight: f.contrib / scaled[f.name], value: f.value, scaled: scaled[f.name], contribution: f.contrib }));
+    }
+    return ex;
+  };
+  const probe = (needle) => ({ needle, probe: needle, calibrated: needle, layer: 26, position: "mean_gen", n_train: 0, cv_auroc: null });
 
   const S = {
-    cruise: { question: "How many races were held in 2009?", ...base, probe: probe(0.91),
+    cruise: { question: "How many races were held in 2009?", ...base, probe: probe(0.91), explain: explainFor(0.91, false),
       sql: "SELECT COUNT(*) FROM races WHERE year = 2009", columns: ["COUNT(*)"], rows: [[17]] },
-    caution: { question: "Which constructor scored the most points in 2010?", ...base, probe: probe(0.63),
+    caution: { question: "Which constructor scored the most points in 2010?", ...base, probe: probe(0.63), explain: explainFor(0.63, true),
       sql: "SELECT c.name, SUM(cs.points) AS pts\nFROM constructorStandings cs\nJOIN races r ON r.raceId = cs.raceId\nJOIN constructors c ON c.constructorId = cs.constructorId\nWHERE r.year = 2010\nGROUP BY c.constructorId\nORDER BY pts DESC\nLIMIT 1",
       columns: ["name", "pts"], rows: [["Red Bull", 4851]] },
-    ask: { question: "What was Lewis Hamilton's best qualifying lap?", ...base, probe: probe(0.27),
+    ask: { question: "What was Lewis Hamilton's best qualifying lap?", ...base, probe: probe(0.27), explain: explainFor(0.27, true),
       sql: "SELECT MIN(q.q3)\nFROM qualifying q\nJOIN drivers d ON d.driverId = q.driverId\nWHERE d.forename = 'Lewis' AND d.surname = 'Hamilton'",
       columns: ["MIN(q.q3)"], rows: [["1:14.260"]] },
-    readings: { question: "What is the average lap time of Lewis Hamilton?", ...base, probe: probe(0.22), readings_seconds: 4.8,
+    readings: { question: "What is the average lap time of Lewis Hamilton?", ...base, probe: probe(0.22), explain: explainFor(0.22, false), readings_seconds: 4.8,
       sql: "SELECT AVG(lt.milliseconds)\nFROM lapTimes lt\nJOIN drivers d ON d.driverId = lt.driverId\nWHERE d.forename = 'Lewis' AND d.surname = 'Hamilton'",
       columns: ["AVG(lt.milliseconds)"], rows: [[97420.5]],
       readings: [
@@ -31,7 +53,7 @@
           sql: "SELECT AVG(r.fastestLapTime)\nFROM results r\nJOIN drivers d ON d.driverId = r.driverId\nWHERE d.forename = 'Lewis' AND d.surname = 'Hamilton'" },
       ] },
     audit: { question: "For the user No.24, how many times is the number of his/her posts compared to his/her votes?", ...base,
-      db_id: "codebase_community", probe: probe(0.71), columns: null, rows: null, sql: null },
+      db_id: "codebase_community", probe: probe(0.71), explain: explainFor(0.71, false), columns: null, rows: null, sql: null },
   };
 
   const params = new URLSearchParams(location.search);
@@ -44,7 +66,7 @@
   };
   const send = (msg, ms) => setTimeout(() => onMessage({ data: JSON.stringify(msg) }), ms);
   let scenario = "cruise";
-  let jobId = 100;
+  let jobId = 100 + (Date.now() % 100000); // distinct per page load, so a result is never taken for a replay of the last one
   const status = (warm) => ({ type: "status", ready: !warm, warming: warm, warm_seconds: warm ? 14 : null, queue: 0, fake: false, probe: !warm, restarts: 0 });
 
   // Stand-in socket: replies with the same message sequence the gateway sends.
@@ -58,6 +80,7 @@
       if (scenario === "awaiting") return;
       send({ type: "stage", job_id, stage: "scoring", elapsed: 1.0 }, 1150);
       if (scenario === "stage") return; // hold mid-job for screenshots
+      if (scenario === "error") { send({ type: "error", job_id, message: "The model took too long; try a shorter question." }, 1350); return; }
       send({ type: "stage", job_id, stage: "executing", elapsed: 1.2 }, 1350);
       send({ type: "result", job_id, ...S[scenario] }, 1500);
     },
@@ -74,8 +97,8 @@
 
   function run(name) {
     if (pending) return;
-    if (name === "idle") { if (params.get("state") !== "idle") location.search = "?mock=1"; return; }
-    if (name === "warming") { if (params.get("state") !== "warming") location.search = "?mock=1&state=warming"; return; }
+    if (name === "idle") { if (params.get("state") !== "idle") location.search = "?mock=1&state=idle"; else setMode("test"); return; }
+    if (name === "warming") { if (params.get("state") !== "warming") location.search = "?mock=1&state=warming"; else setMode("test"); return; }
     if (name.startsWith("check")) {
       setMode("check");
       const id = { "check-flagged": "bird571", "check-clear": "bird89" }[name];
@@ -85,36 +108,47 @@
       }, 500);
       return;
     }
-    setMode("ask");
+    setMode("test");
     scenario = name;
-    if (name === "stage") name = "caution"; // holds at "Scoring confidence"
+    if (name === "stage" || name === "error") name = "caution"; // stage holds at "Scoring confidence"; error ends with a timeout
     $("db").value = S[name] && S[name].db_id ? S[name].db_id : DB;
     $("question").value = (S[name] || S.ask).question;
-    $("form").requestSubmit();
+    $("flight").requestSubmit();
   }
 
   const state = params.get("state");
   if (state) {
-    run(state);
+    const names = state.split(",");
+    run(names[0]);
+    let k = 1;
+    const next = setInterval(() => {
+      if (k >= names.length) { clearInterval(next); return; }
+      if (!pending) run(names[k++]);
+    }, 300);
+    const last = names[names.length - 1];
     const pick = params.get("choose");
-    if (state === "readings" && pick) {
+    if (last === "readings" && pick) {
       setTimeout(() => {
-        const card = [...document.querySelectorAll(".pass:first-child .reading")].find((c) => c.querySelector(".rname").firstChild.textContent === `Reading ${pick}`);
+        const card = [...document.querySelectorAll("#runs .run:first-child .reading")].find((c) => c.querySelector(".rname").firstChild.textContent === `Reading ${pick}`);
         if (card) card.click();
-      }, 2000);
+      }, 2000 * names.length);
     }
+    if (params.get("why") === "1") setTimeout(() => {
+      const d = document.querySelector("#runs .run:first-child details.why");
+      if (d) { d.open = true; d.scrollIntoView({ block: "start" }); }
+    }, 2000 * names.length);
     return;
   }
 
   const strip = document.createElement("div");
-  strip.setAttribute("style", "margin-top:28px;padding-top:10px;border-top:1px dashed var(--rule);display:flex;flex-wrap:wrap;gap:8px;font-size:var(--t0)");
-  for (const name of ["idle", "warming", "awaiting", "stage", "cruise", "caution", "ask", "readings", "audit", "check", "check-flagged", "check-clear"]) {
+  strip.setAttribute("style", "padding:8px 0 0;display:flex;flex-wrap:wrap;gap:8px;font-size:var(--t0)");
+  for (const name of ["idle", "warming", "awaiting", "stage", "cruise", "caution", "ask", "readings", "audit", "error", "check", "check-flagged", "check-clear"]) {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = name;
-    b.setAttribute("style", "padding:4px 10px;border:1px solid var(--ink-2);border-radius:4px;background:transparent;font-size:var(--t0)");
+    b.setAttribute("style", "padding:4px 10px;border:1px solid var(--ink-2);border-radius:3px;background:transparent;font-size:var(--t0)");
     b.addEventListener("click", () => run(name));
     strip.append(b);
   }
-  document.querySelector("main").append(strip);
+  $("flight").append(strip);
 })();

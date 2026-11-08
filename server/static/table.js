@@ -9,12 +9,6 @@ const BANDS = [ // same edges as app.js
 ];
 const SHOW_ROWS = 5;
 const POSITION = { last_prompt: "last prompt token", last_gen: "last generated token", mean_gen: "mean over generated SQL tokens" };
-const GROUP_NOTE = {
-  "Internals": (f) => `probe ${fx(f.probe, 2)}`,
-  "Token confidence": (f) => `mean ${fx(f.logprob_mean, 2)} · min ${fx(f.logprob_min, 2)}`,
-  "Size": (f) => `${f.question_chars} + ${f.sql_chars} chars · ${f.n_joins} joins`,
-  "Compiles": (f) => (f.executes == null ? "" : f.executes > 0.5 ? "compiles" : "does not compile"),
-};
 // Replay schedule, ms after the result is shown.
 const T = { z: 300, p: 1400, platt: 2400, ref: 3300, group0: 4000, groupGap: 750, total: 7200, swing: 7800, done: 9100 };
 
@@ -39,24 +33,24 @@ let lastShown = null;
 let currentJob = null;
 
 /* ---------- gauge (same geometry as the phone) ---------- */
-function buildTape() {
+function buildTape(ticks = "ticks", bands = "bands", names = "names") {
   for (let i = 0; i <= 10; i++) {
     const t = el("span");
     t.style.left = `calc(${i * 10}% - ${i === 10 ? 1 : 0}px)`;
-    $("ticks").append(t);
+    $(ticks).append(t);
   }
   for (const b of BANDS) {
     const w = (b.to - b.from) * 100 + "%";
     const seg = el("span", "b-" + b.key);
     seg.style.width = w;
-    $("bands").append(seg);
+    $(bands).append(seg);
     const name = el("span", null, b.name);
     name.style.width = w;
-    $("names").append(name);
+    $(names).append(name);
   }
 }
 const bandOf = (s) => BANDS.find((b) => s < b.to) || BANDS[BANDS.length - 1];
-const bandInk = (key) => (key === "caution" ? "var(--caution-ink)" : `var(--${key})`);
+const bandInk = (key) => `var(--${key})`;
 
 function parkCarriage() {
   const c = $("carriage");
@@ -70,6 +64,7 @@ function setGauge(score, mode) {
   const band = $("band");
   band.style.color = "";
   band.className = "";
+  $("value").classList.toggle("blank", mode === "hold" || score == null || Number.isNaN(score));
   if (mode === "hold") {
     parkCarriage();
     $("value").textContent = "--";
@@ -127,7 +122,7 @@ function renderQuestion(db_id, question) {
 
 function renderAnswer(r) {
   const a = renderQuestion(r.db_id, r.question);
-  a.querySelector(".route").textContent = `${r.db_id} · local${r.fake ? " · fake worker" : ""} · generated in ${fx(r.gen_seconds, 2)} s`;
+  a.querySelector(".route").textContent = `${r.db_id}${r.fake ? " · fake worker" : ""} · ${fx(r.gen_seconds, 1)} s`;
   a.append(el("pre", "sql", r.sql || "(no SQL generated)"));
   if (r.error) a.append(el("p", "err", r.timed_out ? `Timed out: ${r.error}` : r.error));
   else if (r.rows) {
@@ -142,12 +137,8 @@ function renderAnswer(r) {
 function setProbeLine(r) {
   const p = r && r.probe;
   $("probeline").replaceChildren();
-  if (!p || typeof p !== "object") { $("probeline").textContent = r ? "No probe loaded" : ""; return; }
-  if (r.explain && r.explain.synthetic) $("probeline").append(el("span", "synth", "Synthetic test probe: random weights, not evidence"), " · ");
-  const bits = [`Probe on layer ${p.layer}`, POSITION[p.position] || p.position];
-  bits.push(p.n_train != null ? `trained on ${p.n_train}` : "trained on [TBD]");
-  bits.push(`BIRD AUROC ${fx(p.bird_probe_auroc, 3)}`);
-  $("probeline").append(bits.join(" · "));
+  if (!p || typeof p !== "object") return;
+  if (r.explain && r.explain.synthetic) $("probeline").append(el("span", "synth", "Synthetic test probe: random weights, not evidence"));
 }
 
 /* ---------- explanation ---------- */
@@ -157,18 +148,14 @@ function verdictBlock(ex) {
   const v = el("div", "verdict");
   const z = el("div", "step");
   z.dataset.t = T.z;
-  z.append(el("b", null, minus(ex.z.toFixed(2))),
-    el("small", null, `z = b0 + Σ wᵢ(hᵢ − μᵢ) over ${ex.d} dimensions of layer ${ex.layer}, ${POSITION[ex.position] || ex.position}`));
+  z.append(el("b", null, minus(ex.z.toFixed(2))), el("small", null, `probe logit, layer ${ex.layer}`));
   const arrow = el("div", "step arrow", "sigmoid →");
   arrow.dataset.t = T.p;
   const p = el("div", "step");
   p.dataset.t = T.p;
-  p.append(el("b", null, ex.p_raw.toFixed(2)), el("small", null, "raw probe: uncalibrated chance the SQL is right"));
+  p.append(el("b", null, ex.p_raw.toFixed(2)), el("small", null, "probe alone, before stacking"));
   v.append(z, arrow, p);
-  const platt = el("p", "step platt",
-    `Platt-calibrated: ${ex.p_cal.toFixed(2)} (a ${minus(ex.platt_a.toFixed(2))}, b ${minus(ex.platt_b.toFixed(2))}). The stack below takes the raw value.`);
-  platt.dataset.t = T.platt;
-  wrap.append(v, platt);
+  wrap.append(v);
   return wrap;
 }
 
@@ -195,13 +182,13 @@ function waterfall(ex) {
     wf.append(r);
     return track;
   };
-  const ref = row("Average question", "reference: stack intercept", minus(ex.stack_ref.toFixed(2)), T.ref);
+  const ref = row("Baseline", "", minus(ex.stack_ref.toFixed(2)), T.ref);
   const m = el("i", "mark ref");
   m.style.left = pct(ex.stack_ref) + "%";
   ref.append(m);
   ex.groups.forEach((g, k) => {
     const t = T.group0 + k * T.groupGap;
-    const track = row(g.name, GROUP_NOTE[g.name] ? GROUP_NOTE[g.name](feats) : "", sx(g.value, 2), t);
+    const track = row(g.name, "", sx(g.value, 2), t);
     const a = cum[k], b = cum[k + 1];
     const bar = el("i", "bar " + (g.value >= 0 ? "up" : "down"));
     bar.style.left = pct(Math.min(a, b)) + "%";
@@ -209,7 +196,7 @@ function waterfall(ex) {
     bar.dataset.t = t + 60;
     track.append(bar);
   });
-  const tot = row("Needle logit", "sum of the rows above", minus(ex.logit.toFixed(2)), T.total);
+  const tot = row("Needle logit", "", minus(ex.logit.toFixed(2)), T.total);
   const tm = el("i", "mark");
   tm.style.left = pct(ex.logit) + "%";
   tot.append(tm);
@@ -232,10 +219,10 @@ function waterfall(ex) {
   wrap.append(wf);
 
   const key = el("p", "key");
-  key.append(el("span", "k-up", "raises the needle"), el("span", "k-down", "lowers it"), el("span", "k-zero", "logit 0 = needle 0.50"));
-  wrap.append(key, el("p", "cap", "log-odds relative to an average training question"));
+  key.append(el("span", "k-up", "raises"), el("span", "k-down", "lowers"), el("span", "k-zero", "needle 0.50"));
+  wrap.append(key);
   const total = el("p", "step wf-total",
-    `${minus(ex.stack_ref.toFixed(2))} ${ex.groups.map((g) => sx(g.value, 2).replace(/^([+−])/, "$1 ")).join(" ")} = ${minus(ex.logit.toFixed(2))} → sigmoid → needle ${ex.needle.toFixed(2)}`);
+    `${minus(ex.stack_ref.toFixed(2))} ${ex.groups.map((g) => sx(g.value, 2).replace(/^([+−])/, "$1 ")).join(" ")} = ${minus(ex.logit.toFixed(2))} → needle ${ex.needle.toFixed(2)}`);
   total.dataset.t = T.swing;
   wrap.append(total);
   return wrap;
@@ -246,9 +233,8 @@ function recordBlock(ex, r) {
   const tr = ex.track_record || {};
   const rate = tr.ask_band_wrong_rate;
   const n = tr.n;
-  ul.append(el("li", null, `In the Ask band, the SQL was wrong ${rate == null ? "[TBD]" : Math.round(rate * 100) + "%"} of the time (n=${n == null ? "[TBD]" : n}).`));
-  ul.append(el("li", null, `Expected calibration error: ${fx(ex.ece, 3)}.`));
-  ul.append(el("li", null, `Breakdown computed in ${fx(ex.ms, 1)} ms, before the SQL ran.`));
+  const nTxt = n == null ? "[TBD]" : Number(n).toLocaleString("en-US");
+  ul.append(el("li", null, `Ask band answers were wrong ${rate == null ? "[TBD]" : Math.round(rate * 100) + "%"} of the time on ${nTxt} held-out questions.`));
   return ul;
 }
 
@@ -257,7 +243,7 @@ function renderExplain(r) {
   col.replaceChildren();
   const ex = r.explain;
   if (!ex) {
-    const msg = r.probe == null ? "No probe loaded, so there is no score to break down." : "This result carries no breakdown.";
+    const msg = r.probe == null ? "No probe loaded, so no score to break down." : "This result carries no breakdown.";
     col.append(el("p", "noex", msg));
     return false;
   }
@@ -266,73 +252,141 @@ function renderExplain(r) {
 }
 
 /* ---------- how ---------- */
-function rampColor(t) { // sequential, one hue: paper-2 (#e8e2d5) -> --up (#25639e)
-  const a = [0xe8, 0xe2, 0xd5], b = [0x25, 0x63, 0x9e];
+function rampColor(t) { // sequential, neutral: --panel-3 (#282d35) -> --ink (#e8e6e0)
+  const a = [0x28, 0x2d, 0x35], b = [0xe8, 0xe6, 0xe0];
   const c = a.map((x, i) => Math.round(x + (b[i] - x) * Math.min(1, Math.max(0, t))));
   return `rgb(${c.join(",")})`;
 }
 
-function renderHow(ex) {
+// Plain words for each stack input (names from probe.stack_features).
+const INPUT_WORDS = {
+  probe: (ex) => `Probe score (layer ${ex.layer})`, logprob_mean: () => "Mean token log-prob", logprob_min: () => "Lowest token log-prob",
+  question_chars: () => "Question length", sql_chars: () => "SQL length", n_joins: () => "JOINs", n_aggregates: () => "Aggregates",
+  n_subqueries: () => "Subqueries", n_prompt: () => "Prompt tokens", n_gen: () => "SQL tokens", executes: () => "SQL compiles",
+};
+
+function stackTable(ex) { // one row per learned weight: logit = intercept + Σ contributions, exactly
+  const terms = ex.stack_terms || (ex.features || []).map((f) => ({ name: f.name, value: f.value, contribution: f.contrib }));
+  const hasW = terms.length && terms.every((t) => t.weight != null);
+  const b0 = ex.stack_intercept != null ? ex.stack_intercept : ex.stack_ref;
+  const t = el("table", "wt");
+  const hr = el("tr");
+  const heads = hasW ? [["Input", 0], ["Weight", 1], ["Contribution", 1], ["", 0]] : [["Input", 0], ["Contribution", 1], ["", 0]];
+  for (const [h, n] of heads) hr.append(el("th", n ? "n" : null, h));
+  const th = el("thead");
+  th.append(hr);
+  const tb = el("tbody");
+  const maxAbs = Math.max(1e-9, Math.abs(b0), ...terms.map((x) => Math.abs(x.contribution)));
+  const cbar = (c, cls) => {
+    const trk = el("span", "ctrk" + (cls ? " " + cls : ""));
+    const bar = el("i", "cbar " + (c >= 0 ? "up" : "down"));
+    const w = (Math.abs(c) / maxAbs) * 50;
+    bar.style.width = w + "%";
+    bar.style.left = c >= 0 ? "50%" : 50 - w + "%";
+    trk.append(bar);
+    const td = el("td");
+    td.append(trk);
+    return td;
+  };
+  const ref = el("tr", "ref");
+  ref.append(el("td", "lab", "Intercept"));
+  if (hasW) ref.append(el("td", "n", ""));
+  ref.append(el("td", "n", sx(b0, 3)), cbar(b0));
+  tb.append(ref);
+  let sum = b0;
+  for (const x of terms) {
+    const tr = el("tr");
+    tr.append(el("td", "lab", (INPUT_WORDS[x.name] || (() => x.name))(ex)));
+    if (hasW) tr.append(el("td", "n", sx(x.weight, 3)));
+    tr.append(el("td", "n", sx(x.contribution, 3)), cbar(x.contribution));
+    tb.append(tr);
+    sum += x.contribution;
+  }
+  const tot = el("tr", "sum");
+  tot.append(el("td", null, "Logit"));
+  if (hasW) tot.append(el("td"));
+  tot.append(el("td", "n", minus(sum.toFixed(3))), cbar(sum, "sum"));
+  tb.append(tot);
+  t.append(th, tb);
+  return { table: t, sum, hasW, n: terms.length };
+}
+
+function renderHow(ex, r) {
   const col = $("howcol");
   col.replaceChildren();
   if (!ex) { col.append(el("p", "noex", "Nothing to show until a scored answer arrives.")); return; }
+  const card = ex.model_card || {};
+  const synthetic = !!(ex.synthetic || card.synthetic);
+  const L = el("div", "how-l"), R = el("div", "how-r");
+
+  // left: the needle's logistic regression, every weight
+  L.append(el("h2", null, "How the needle is computed"));
+  if (synthetic) { const route = el("p", "route"); route.append(el("span", "synth", "Synthetic test probe: random weights, not evidence")); L.append(route); }
+  const st = stackTable(ex);
+  const s2 = el("div", "how-block");
+  s2.append(el("h3", null, `The needle: logistic regression over ${st.n} inputs`), st.table,
+    el("p", "dsum", `logit ${minus(st.sum.toFixed(3))} → needle ${ex.needle.toFixed(2)}${Math.abs(st.sum - ex.logit) > 1e-6 ? " (worker reports logit " + minus(ex.logit.toFixed(3)) + ")" : ""}`));
+  L.append(s2);
+  L.append(el("p", "fact", "Both stages are logistic regression: every prediction is an exact sum of weight × input. Chosen for that auditability; not compared against nonlinear models."));
+
+  // right: the probe's weights over one layer, then the layer stack
+  const pt = ex.probe_terms || {};
+  const dims = pt.dims ? pt.dims.map((d) => ({ dim: d.dim, c: d.contribution })) : (ex.dims || []).map(([i, c]) => ({ dim: i, c }));
+  const nD = card.probe_dims || ex.d;
+  const b1 = el("div", "how-block");
+  b1.append(el("h3", null, `The probe: ${Number(nD).toLocaleString("en-US")} weights over layer ${ex.layer}`));
+  const maxAbs = Math.max(1e-12, ...dims.map((d) => Math.abs(d.c)));
+  const list = el("div", "dims");
+  for (const d of dims) {
+    const rowE = el("div", "drow");
+    const tr = el("div", "dtrack");
+    const bar = el("i", "dbar " + (d.c >= 0 ? "up" : "down"));
+    const w = (Math.abs(d.c) / maxAbs) * 50;
+    bar.style.width = w + "%";
+    bar.style.left = d.c >= 0 ? "50%" : 50 - w + "%";
+    tr.append(bar);
+    rowE.append(el("span", "k", `#${d.dim}`), tr, el("span", "v", sx(d.c, 3)));
+    list.append(rowE);
+  }
+  b1.append(list);
+  const topSum = dims.reduce((s, d) => s + d.c, 0);
+  const rest = pt.rest != null ? pt.rest : ex.rest;
+  const nRest = pt.n_rest != null ? pt.n_rest : ex.d - dims.length;
+  b1.append(el("p", "dsum",
+    `b0 ${minus(ex.b0.toFixed(3))}  ${sx(topSum, 3)} (these ${dims.length})  ${sx(rest, 3)} (other ${Number(nRest).toLocaleString("en-US")})  = z ${minus(ex.z.toFixed(3))} → probe score ${ex.p_raw.toFixed(2)}`));
+  R.append(b1);
+
   const nL = ex.n_layers;
   const au = new Map((ex.layer_auroc || []).map((x) => [x.layer, x.auroc]));
   const vals = [...au.values()];
   const lo = 0.5, hi = vals.length ? Math.max(0.5001, ...vals) : 1;
-
-  const a = el("div");
-  a.append(el("h3", null, `Layer stack: embedding + ${nL} transformer layers`));
+  const a = el("div", "how-block");
+  a.append(el("h3", null, `${nL} layers, the probe reads one`));
   const strip = el("div", "layers");
-  for (let L = 0; L <= nL; L++) {
-    const c = el("span", L === ex.layer ? "used" : null);
-    if (au.has(L)) c.style.background = rampColor((au.get(L) - lo) / (hi - lo));
-    c.title = `${L === 0 ? "Embedding" : "Layer " + L}: ${au.has(L) ? "AUROC " + au.get(L).toFixed(3) : "not measured"}${L === ex.layer ? ", used" : ", not used"}`;
+  for (let Li = 0; Li <= nL; Li++) {
+    const c = el("span", Li === ex.layer ? "used" : null);
+    if (au.has(Li)) c.style.background = rampColor((au.get(Li) - lo) / (hi - lo));
+    c.title = `${Li === 0 ? "Embedding" : "Layer " + Li}: ${au.has(Li) ? "AUROC " + au.get(Li).toFixed(3) : "not measured"}${Li === ex.layer ? ", used" : ", not used"}`;
     strip.append(c);
   }
   const labels = el("div", "layer-labels");
-  const left = el("span", null, "Embedding (index 0) · not used");
+  const left = el("span", null, "Embedding");
   left.style.left = "0";
-  const right = el("span", null, `Layer ${nL} · not used`);
+  const right = el("span", null, `Layer ${nL}`);
   right.style.right = "0";
-  const used = el("span", "used", `Layer ${ex.layer} · used${au.has(ex.layer) ? " · AUROC " + au.get(ex.layer).toFixed(3) : ""}`);
+  const used = el("span", "used", `Layer ${ex.layer}, used${au.has(ex.layer) ? " · AUROC " + au.get(ex.layer).toFixed(3) : ""}`);
   used.style.left = `${((ex.layer + 0.5) / (nL + 1)) * 100}%`;
   labels.append(left, right, used);
   a.append(strip, labels);
   if (vals.length) {
     const lg = el("div", "legend");
-    lg.append(el("span", null, "AUROC 0.50"));
+    lg.append(el("span", null, "Spider AUROC 0.50"));
     for (let i = 0; i <= 4; i++) { const sw = el("i"); sw.style.background = rampColor(i / 4); lg.append(sw); }
-    lg.append(el("span", null, `${hi.toFixed(2)} · plain cells: not measured`));
-    a.append(lg, el("p", "cap", "how well each layer separates right from wrong on Spider; same for every question"));
-  } else {
-    a.append(el("p", "cap", "Per-layer AUROC on Spider: [TBD]"));
+    lg.append(el("span", null, hi.toFixed(2)));
+    a.append(lg);
   }
-  a.append(el("p", "cap", `Every layer except ${ex.layer}: not used by this probe.`));
-
-  const b = el("div");
-  b.append(el("h3", null, `Top ${ex.dims.length} of ${ex.d} dimensions`));
-  const maxAbs = Math.max(1e-12, ...ex.dims.map((d) => Math.abs(d[1])));
-  const list = el("div", "dims");
-  for (const [i, c] of ex.dims) {
-    const row = el("div", "drow");
-    const tr = el("div", "dtrack");
-    const bar = el("i", "dbar " + (c >= 0 ? "up" : "down"));
-    const w = (Math.abs(c) / maxAbs) * 50;
-    bar.style.width = w + "%";
-    bar.style.left = c >= 0 ? "50%" : 50 - w + "%";
-    tr.append(bar);
-    row.append(el("span", null, `#${i}`), tr, el("span", "v", sx(c, 3)));
-    list.append(row);
-  }
-  b.append(list);
-  const topSum = ex.dims.reduce((s, d) => s + d[1], 0);
-  b.append(el("p", "dsum",
-    `b0 ${minus(ex.b0.toFixed(3))}  ${sx(topSum, 3)} (top ${ex.dims.length})  ${sx(ex.rest, 3)} (other ${ex.d - ex.dims.length})  = z ${minus(ex.z.toFixed(3))} → sigmoid → raw probe ${ex.p_raw.toFixed(2)}`));
-  b.append(el("p", "dsum", `Top 20 cover ${(ex.share_top20 * 100).toFixed(1)}% of the total |contribution|.`));
-  b.append(el("p", "cap", "contribution of each raw dimension to this score; individual dimensions have no known meaning"));
-  if (!ex.centered) b.append(el("p", "cap", "Probe file has no mean vector: contributions are wᵢhᵢ, uncentered."));
-  col.append(a, b);
+  R.append(a);
+  col.append(L, R);
 }
 
 /* ---------- replay ---------- */
@@ -346,24 +400,24 @@ function play(r, animate) {
   setProbeLine(r);
   renderAnswer(r);
   const has = renderExplain(r);
-  renderHow(r.explain);
+  renderHow(r.explain, r);
   const nd = needleOf(r);
+  renderInside(r, animate ? "animate" : "still");
   if (!has || !animate) {
     for (const n of document.querySelectorAll("#excol .step, #excol .bar")) n.classList.add("on");
     setGauge(nd, "noprobe");
-    $("status").textContent = has ? "Score computed before the SQL ran." : nd == null ? "Probe not loaded." : "";
+    $("status").textContent = has ? "Scored before the SQL ran." : nd == null ? "Probe not loaded." : "";
     playing = false;
     return;
   }
   playing = true;
   setHow(false); // a new answer replays in the explanation column
   setGauge(null, "hold");
-  $("status").textContent = "Score computed before the SQL ran. Replaying its breakdown.";
+  $("status").textContent = "Scored before the SQL ran.";
   for (const n of document.querySelectorAll("#excol .step, #excol .bar")) later(Number(n.dataset.t || 0), () => n.classList.add("on"));
   later(T.swing, () => setGauge(nd, "noprobe"));
   later(T.done, () => {
     playing = false;
-    $("status").textContent = "Score computed before the SQL ran.";
     if (deferred) { const d = deferred; deferred = null; play(d, true); }
   });
 }
@@ -372,7 +426,8 @@ const STAGE = { generating: "Generating SQL", scoring: "Scoring it from the mode
 let stageLabel = STAGE.generating;
 const drawClock = () => { $("status").textContent = `${stageLabel} · ${((performance.now() - workingSince) / 1000).toFixed(1)} s`; };
 
-function showWorking(job) {
+function showWorking(job, live) {
+  if (live) panelOff(); // a live job returns the screen to the live view
   setCheck(false); // a new Ask job ends the check reveal
   if (playing) return; // the queue line shows it; the replay finishes first
   clearTimers();
@@ -380,6 +435,7 @@ function showWorking(job) {
   renderQuestion(job.db_id, job.question).append(el("pre", "sql", "Generating SQL"));
   $("excol").replaceChildren(el("p", "noex", "Awaiting probe."));
   renderHow(null);
+  renderInside(job, "working"); // Inside stays open across questions: the strip refills with each answer
   setGauge(null, "hold");
   workingSince = performance.now();
   stageLabel = STAGE.generating;
@@ -393,7 +449,7 @@ function showStage(m) {
   if (!clock) return;
   drawClock();
   const pre = document.querySelector("#answer pre.sql");
-  if (pre && m.stage !== "generating") pre.textContent = "SQL written; it is shown here with its score";
+  if (pre && m.stage !== "generating") pre.textContent = "SQL written. Shown once scored.";
 }
 function stopClock() { if (clock) clearInterval(clock); clock = null; }
 
@@ -404,6 +460,9 @@ const CALM = { value: 300, word: 900, why: 1500 };
 let checkTimers = [];
 let presets = []; // GET /api/presets: names the answer key a checked query came from
 fetch("api/presets").then((r) => r.json()).then((d) => { presets = d.presets || []; }).catch(() => {});
+// Scoreboard / Failures panels (scoreboard.js) replace these; a live message calls panelOff().
+let panelOpen = () => false;
+let panelOff = () => {};
 let checkFit = null; // re-lays out the current check for the window size
 let checkMode = false;
 
@@ -519,20 +578,10 @@ function fanStrip(fo, f, h) {
   const g = fo.grid, L = fo.left, R = fo.right, G = g.group;
   const rl = shortIds(g.rows), cl = shortIds(g.cols);
   const lk = `${L.table}.${L.key}`, rk = `${R.table}.${R.key}`;
-  const full = g.cells.length === g.rows.length * g.cols.length;
   const of = (k, n) => (k === n ? `all ${nfmt(n)}` : `${k} of ${nfmt(n)}`);
-  let cap;
-  if (!g.sampled) cap = `Every joined row: ${lk} down, ${rk} across.`;
-  else if (G) {
-    const why = h && h.row != null && String(h.row) === String(G.value) ? "the headline row" : `has the most repeated ${L.table} row`;
-    cap = `Sample from ${G.column} ${G.value} (${why}): ${of(g.rows.length, G.left)} ${lk} down, ${of(g.cols.length, G.right)} ${rk} across.`;
-  } else {
-    cap = `Sample around the most repeated ${L.table} row: ${g.rows.length} of ${nfmt(L.distinct)} ${lk} down, ${g.cols.length} of ${nfmt(R.distinct)} ${rk} across.`;
-  }
-  if (!full) cap += " Empty cell: a pair the JOIN did not produce.";
-  const pre = [...new Set([rl.prefix, cl.prefix].filter(Boolean))];
-  if (pre.length) cap += ` Ids without ${pre.join(" / ")}.`;
-  if (g.cells.some((c) => c[2] > 1)) cap += " A number is how many joined rows share that pair.";
+  let cap = `${lk} down · ${rk} across`;
+  if (g.sampled) cap += G ? ` · ${of(g.rows.length, G.left)} × ${of(g.cols.length, G.right)} shown` : ` · ${g.rows.length} × ${g.cols.length} shown`;
+  if (g.cells.some((c) => c[2] > 1)) cap += " · a number: joined rows sharing that pair";
 
   const grid = el("div", "fgrid");
   grid.append(el("span"));
@@ -588,8 +637,10 @@ function fanStrip(fo, f, h) {
 function showCheck(m, animate) {
   const c = m.check || {};
   const job = m.job || {};
+  if (animate) panelOff();
   setCov(false);
   setHow(false);
+  setInside(false);
   setCheck(true);
   const col = $("checkcol");
   col.replaceChildren();
@@ -600,7 +651,7 @@ function showCheck(m, animate) {
   const db = c.db_id || job.db_id || "";
   const pre = presets.find((p) => p.db_id === db && (p.question === job.question || p.sql === c.sql));
   const label = pre ? pre.label : "";
-  const bits = [db, label, c.audit_seconds != null ? `audited in ${fx(c.audit_seconds, 2)} s` : ""].filter(Boolean);
+  const bits = [db, label].filter(Boolean);
   col.append(el("p", "route", bits.join(" · ")), el("h2", null, job.question || label || `SQL sent for a pre-flight check on ${db}`));
 
   const h = c.headline;
@@ -632,7 +683,7 @@ function showCheck(m, animate) {
     bb.append(el("span", "txt", h.before_text), el("i", "strike"));
     before.append(el("small", null, "As written"), bb);
     const after = el("div", "rv");
-    after.append(el("small", null, "Deduplicated"), el("b", null, h.after_text));
+    after.append(el("small", null, "Corrected"), el("b", null, h.after_text));
     reveal.append(ph(before, K.before), ph(after, K.after, "ph after"));
     at(K.strike, () => before.classList.add("struck"));
     chars = h.before_text.length + h.after_text.length;
@@ -655,7 +706,7 @@ function showCheck(m, animate) {
       chars = v.length;
     }
     const word = el("div", "rv okword");
-    const wb = el("b", null, flagged ? "Double counted" : failed ? "Audit incomplete" : "No double counting found");
+    const wb = el("b", null, flagged ? "Double counting" : failed ? "Check incomplete" : "No double counting found");
     wb.style.color = flagged ? "var(--ask)" : failed ? "var(--caution-ink)" : "";
     word.append(wb);
     reveal.append(ph(word, Q.word));
@@ -684,24 +735,23 @@ function showCheck(m, animate) {
   // why: verdict, plain-English explanation, the auditor's counts, where the corrected number came from
   const whyT = flagged && h ? K.why : Q.why;
   if (flagged) {
-    if (h) why.append(el("p", "vword", "Double counted"));
+    if (h) why.append(el("p", "vword", "Double counting"));
     if (c.explanation) why.append(el("p", "expl", c.explanation));
     if ((c.findings || []).length) why.append(evidence(c.findings));
     const cor = c.corrected;
     const tables = [...new Set((c.findings || []).map((f) => f.table).filter((t) => t !== "*"))].join(" and ");
     let fix;
-    if (!cor) fix = "The auditor has no rewrite for this query, so the number as written stays unverified.";
+    if (!cor) fix = "No automatic rewrite for this query, so the number as written stays unverified.";
     else if (cor.error) fix = `The corrected query failed: ${cor.error}`;
-    else if (!h) fix = "The corrected query ran, but no single number changed in its first row.";
-    else if (cor.source === "hand") fix = "Deduplicated value from a hand-written fix for this answer key, checked against the raw tables.";
-    else fix = `Deduplicated value from the auditor's rewrite, which counts each ${tables || "joined"} row once.`;
+    else if (!h) fix = "The corrected query ran, but no number in its first row changed.";
+    else if (cor.source === "hand") fix = "Corrected value from a hand-written fix, checked against the raw tables.";
+    else fix = `Corrected value from the auditor's rewrite, which counts each ${tables || "joined"} row once.`;
     why.append(el("p", "fixline", fix));
-    if (c.intended) why.append(el("p", "fixline", c.intended));
   } else if (failed) {
-    why.append(el("p", "expl", c.parse_error ? `The SQL did not parse: ${c.parse_error}` : `The auditor could not finish: ${c.audit_error || c.message}`));
+    why.append(el("p", "expl", c.parse_error ? `The SQL did not parse: ${c.parse_error}` : `The check could not finish: ${c.audit_error || c.message}`));
   } else {
     why.append(el("p", "expl", c.audited
-      ? "The auditor counted joined rows against distinct rows for every aggregate behind a JOIN. No row is counted twice."
+      ? "For every aggregate behind a JOIN, joined rows were counted against distinct rows. No row is counted twice."
       : "No JOIN feeds an aggregate here, so no row can be counted twice."));
     if (orig.error) why.append(el("p", "err", orig.error));
     else if (orig.rows && orig.rows.length && !singleValue(orig)) why.append(resultTable(orig.columns, orig.rows));
@@ -718,7 +768,7 @@ function showCheck(m, animate) {
   ph(key, spans.length ? K.hl : 0);
   const cor = c.corrected;
   const corHead = flagged && h && cor && cor.sql
-    ? (cor.source === "hand" ? "Corrected SQL (hand-written fix)" : "Corrected SQL (auditor's rewrite)") : null;
+    ? (cor.source === "hand" ? "Corrected SQL (hand-written)" : "Corrected SQL (auditor rewrite)") : null;
   let hlOn = false, corOn = false, view = null, corNodes = [];
   if (spans.length) at(K.hl, () => { hlOn = true; if (view) view.hl.classList.add("on"); });
   at(K.why, () => { corOn = true; corNodes.forEach((x) => x.classList.add("on")); });
@@ -728,14 +778,30 @@ function showCheck(m, animate) {
     if (!col.contains(left)) return;
     if (fan) fan.size();
     const fs = parseFloat(getComputedStyle(document.documentElement).fontSize);
-    let n = Math.max(4, Math.floor(left.clientHeight / (0.95 * 1.5 * fs)));
-    for (let ctx = 1; ; ) {
+    // Largest type first; at each size, fewer context lines then fewer lines, keeping every highlighted
+    // line (and at least 4). Only at the smallest size does it drop lines below that. Nothing is clipped.
+    const SQL_FS = [0.95, 0.85, 0.78, 0.72];
+    const tryView = (n, ctx) => {
       view = codeView(sql, spans, n, ctx);
       range.textContent = view.range || "";
       left.replaceChildren(view.box, key);
-      if (n <= 4 || left.scrollHeight <= left.clientHeight + 1) break;
-      if (ctx) ctx = 0; else n -= 1;
+      return left.scrollHeight <= left.clientHeight + 1;
+    };
+    const NL = String.fromCharCode(10);
+    const lineStarts = [0];
+    for (let i = sql.indexOf(NL); i !== -1; i = sql.indexOf(NL, i + 1)) lineStarts.push(i + 1);
+    const lineOf = (pos) => { let i = 0; while (i + 1 < lineStarts.length && lineStarts[i + 1] <= pos) i++; return i; };
+    const hlLines = new Set();
+    for (const sp of spans) for (let i = lineOf(sp.start); i <= lineOf(Math.max(sp.start, sp.end - 1)); i++) hlLines.add(i);
+    const floor = Math.max(4, hlLines.size);
+    let fits = false;
+    for (let si = 0; si < SQL_FS.length && !fits; si++) {
+      left.style.setProperty("--sqlfs", SQL_FS[si] + "rem");
+      for (let n = Math.max(floor, Math.floor(left.clientHeight / (SQL_FS[si] * 1.5 * fs))); n >= floor && !fits; n--) {
+        fits = tryView(n, 1) || tryView(n, 0);
+      }
     }
+    for (let n = floor - 1; n >= 1 && !fits; n--) fits = tryView(n, 0); // still at the smallest size
     if (hlOn) view.hl.classList.add("on");
     // the corrected query, when the original fits whole and there is room for a few lines of it
     corNodes = [];
@@ -785,9 +851,10 @@ function loadRisk() {
 
 function setCov(on) {
   covOn = on;
+  if (on) panelOff();
   document.body.classList.toggle("cov", on);
   $("covbtn").setAttribute("aria-pressed", String(on));
-  if (on) { setCheck(false); loadRisk().then(renderCov); }
+  if (on) { setCheck(false); setHow(false); setInside(false); loadRisk().then(renderCov); }
 }
 
 const pct = (x) => `${Math.round(x * 100)}%`;
@@ -812,11 +879,12 @@ function renderCov() {
     d.append(el("span", "lab", lab), el("span", "big", big), el("span", "det", det));
     return d;
   };
+  const f = (x) => Number(x).toLocaleString("en-US");
   $("ledger").replaceChildren(
-    row("Answer locally", n ? pct(k / n) : "--", `${k} of ${n} questions`),
-    row("Accuracy on those", k ? pct(right / k) : "--", k ? `${right} right, ${k - right} wrong answers shipped` : "No question reaches this reading"),
-    row("Answering everything", n ? pct(all / n) : "--", `${all} of ${n} right`, "ref"));
-  $("covnote").textContent = `${risk.source_note}. Showing ${SRC_NAME[covSrc]}: ${n} questions. The curve starts at the ${MIN_K} highest-scored.`;
+    row("Answer locally", n ? pct(k / n) : "--", `${f(k)} of ${f(n)} questions`),
+    row("Accuracy on those", k ? pct(right / k) : "--", k ? `${f(right)} right, ${f(k - right)} wrong answers shipped` : "No question reaches this reading"),
+    row("Answering everything", n ? pct(all / n) : "--", `${f(all)} of ${f(n)} right`, "ref"));
+  $("covnote").textContent = `${SRC_NAME[covSrc]}: ${f(n)} held-out questions, out-of-fold scores.`;
   drawCurve(rows, t);
 }
 
@@ -928,12 +996,14 @@ function onMessage(ev) {
   if (m.type === "check") showCheck(m, true);
   else if (m.type === "stage") showStage(m);
   else if (m.type === "queued") setQueue(currentJob, m.queue);
-  else if (m.type === "working") { currentJob = m.job; setQueue(m.job, m.queue); showWorking(m.job); }
+  else if (m.type === "working") { currentJob = m.job; setQueue(m.job, m.queue); showWorking(m.job, true); }
   else if (m.type === "result") {
+    panelOff();
     currentJob = null;
     setQueue(null, m.queue);
     if (playing) deferred = m; else play(m, true);
   } else if (m.type === "error") {
+    panelOff();
     currentJob = null;
     setQueue(null, m.queue);
     if (!playing) {
@@ -964,20 +1034,165 @@ function connect() {
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { retryMs = 500; connect(); } });
 
+/* ---------- Inside the model: one linear probe per layer, from result.layers ---------- */
+// Each entry {layer, p, z, auroc:[pt, lo, hi]} is that layer's own probe on this answer plus its held-out BIRD
+// AUROC. Only values from the message are drawn; the needle beside the strip is the stacked score (see How).
+let insOn = false;
+let insTimers = [];
+const INS_STEP = 80; // ms between cells, matches --i in the CSS
+
+function setInside(on) {
+  insOn = on;
+  document.body.classList.toggle("ins", on);
+  $("insbtn").setAttribute("aria-pressed", String(on));
+  if (on) { panelOff(); setCheck(false); setCov(false); setHow(false); }
+}
+
+function setInsGauge(score, mode) {
+  const band = $("insband");
+  band.style.color = "";
+  band.className = "";
+  const car = $("inscarriage");
+  $("insvalue").classList.toggle("blank", mode === "hold" || score == null);
+  if (mode === "hold") {
+    car.classList.add("snap"); car.style.transform = "translateX(0)"; void car.offsetWidth; car.classList.remove("snap");
+    $("insvalue").textContent = "--";
+    band.textContent = "Awaiting probe";
+    band.className = "awaiting";
+    $("instape").classList.remove("scored");
+    $("insneedle").className = "needle hold";
+    return;
+  }
+  if (score == null) {
+    $("insvalue").textContent = "--";
+    band.textContent = mode === "noprobe" ? "No probe" : "No reading";
+    $("instape").classList.remove("scored");
+    $("insneedle").className = "needle";
+    return;
+  }
+  const s = Math.min(1, Math.max(0, score));
+  const b = bandOf(s);
+  $("insvalue").textContent = s.toFixed(2);
+  band.textContent = b.name;
+  band.style.color = bandInk(b.key);
+  $("instape").classList.add("scored");
+  $("insneedle").className = "needle on";
+  car.style.transform = `translateX(${(s * 100).toFixed(2)}%)`;
+}
+
+function layerCell(x, i, usedLayer, dense) {
+  const c = el("div", "lc" + (x.layer === usedLayer ? " used" : ""));
+  c.style.setProperty("--i", i);
+  const p = Number(x.p);
+  const hasP = Number.isFinite(p);
+  // With every layer shown, numbers only on every 4th layer and the used one; the rest stay in the tooltip.
+  const labelled = !dense || x.layer % 4 === 0 || x.layer === usedLayer;
+  const pv = el("span", "pv", !labelled ? "" : hasP ? p.toFixed(2) : "--");
+  if (hasP) pv.style.color = bandInk(bandOf(p).key);
+  const colm = el("div", "col");
+  for (const b of BANDS) { // Ask at the bottom, Cruise at the top
+    const seg = el("i", "b-" + b.key);
+    seg.style.height = (b.to - b.from) * 100 + "%";
+    colm.append(seg);
+  }
+  if (hasP) {
+    const fill = el("i", "fill");
+    fill.style.height = (Math.min(1, Math.max(0, p)) * 100).toFixed(1) + "%";
+    colm.append(fill);
+  }
+  const au = Array.isArray(x.auroc) && x.auroc.length ? x.auroc.map(Number) : null;
+  const auT = el("span", "au", !labelled ? "" : au ? au[0].toFixed(2) : "n/a");
+  const atrk = el("div", "atrk");
+  if (au) {
+    const y = (v) => Math.min(1, Math.max(0, (v - 0.5) / 0.5)) * 100; // 0.50 at the baseline, 1.00 at the top
+    const bar = el("i", "abar2");
+    bar.style.height = y(au[0]).toFixed(1) + "%";
+    atrk.append(bar);
+    if (au.length === 3 && Number.isFinite(au[1]) && Number.isFinite(au[2])) {
+      const ci = el("i", "aci");
+      ci.style.bottom = y(au[1]).toFixed(1) + "%";
+      ci.style.height = Math.max(0, y(au[2]) - y(au[1])).toFixed(1) + "%";
+      atrk.append(ci);
+    }
+  }
+  const tag = el("span", "tag", x.layer === usedLayer ? "used by needle" : "");
+  c.title = `${x.layer === 0 ? "Embeddings (layer 0)" : "Layer " + x.layer}: this answer ${hasP ? p.toFixed(3) : "n/a"}`
+    + (x.z != null ? `, z ${minus(Number(x.z).toFixed(2))}` : "")
+    + (au ? `. Held-out BIRD AUROC ${au[0].toFixed(3)}${au.length === 3 ? ` (95% CI ${au[1].toFixed(3)}–${au[2].toFixed(3)})` : ""}` : ". AUROC not measured")
+    + (x.layer === usedLayer ? ". The shipped probe reads this layer." : "");
+  c.append(pv, colm, el("span", "ln", String(x.layer)), atrk, auT, tag);
+  return c;
+}
+
+function renderInside(r, mode) { // mode: idle | working | animate | still
+  insTimers.forEach(clearTimeout); insTimers = [];
+  const strip = $("strip");
+  const note = $("insnote");
+  strip.replaceChildren();
+  note.className = "ins-note";
+  note.textContent = "";
+  if (mode === "idle" || !r) {
+    $("insq").textContent = "Inside the model";
+    $("insroute").textContent = "";
+    strip.append(el("p", "ins-empty", `Ask from a phone at ${location.host}.`));
+    setInsGauge(null);
+    return;
+  }
+  $("insq").textContent = r.question || "Inside the model";
+  if (mode === "working") {
+    $("insroute").textContent = "";
+    strip.append(el("p", "ins-empty", "Generating SQL."));
+    setInsGauge(null, "hold");
+    return;
+  }
+  const layers = Array.isArray(r.layers) ? r.layers.filter((x) => x && Number.isFinite(Number(x.layer))).slice().sort((a, b) => a.layer - b.layer) : null;
+  const usedLayer = r.probe && typeof r.probe === "object" && r.probe.layer != null ? Number(r.probe.layer) : null;
+  const nd = needleOf(r);
+  $("insroute").textContent = r.fake ? "fake worker" : "";
+  if (r.layers_synthetic) { note.className = "ins-note synth"; note.textContent = "Synthetic test data: these layer readings are random, not evidence."; }
+  else if (r.layers_error) note.textContent = `Per-layer probes failed: ${r.layers_error}`;
+  if (!layers || !layers.length) {
+    strip.append(el("p", "ins-empty", r.layers_error ? `Per-layer probes failed: ${r.layers_error}` : "Per-layer probes not installed."));
+    setInsGauge(nd, "noprobe");
+    return;
+  }
+  const grid = el("div", "strip");
+  grid.style.setProperty("--n", layers.length);
+  const cells = layers.map((x, i) => layerCell(x, i, usedLayer, layers.length > 20));
+  const lab = el("div", "lc lab on"); // row label for the AUROC track
+  lab.append(el("span", "pv"), el("div", "col"), el("span", "ln"), el("span", "atrk", "AUROC"), el("span", "au"), el("span", "tag"));
+  grid.append(lab, ...cells);
+  strip.append(grid, el("p", "cap", `Each layer: its own probe. Needle uses layer ${usedLayer != null ? usedLayer : "[TBD]"} + other signals.`));
+  const anim = mode === "animate" && !reduced();
+  const fin = () => setInsGauge(nd, "noprobe");
+  if (anim) {
+    setInsGauge(null, "hold");
+    requestAnimationFrame(() => requestAnimationFrame(() => cells.forEach((c) => c.classList.add("on"))));
+    insTimers.push(setTimeout(fin, cells.length * INS_STEP + 700));
+  } else {
+    cells.forEach((c) => c.classList.add("on"));
+    fin();
+  }
+}
+
 /* ---------- How toggle ---------- */
 function setHow(on) {
   document.body.classList.toggle("how", on);
   $("howbtn").setAttribute("aria-pressed", String(on));
+  if (on) setInside(false);
 }
 function toggleHow() {
-  if (checkMode || covOn) { setCheck(false); setCov(false); setHow(true); return; }
+  if (checkMode || covOn || insOn || panelOpen()) { panelOff(); setCheck(false); setCov(false); setInside(false); setHow(true); return; }
   setHow(!document.body.classList.contains("how"));
 }
 $("howbtn").addEventListener("click", toggleHow);
+$("insbtn").addEventListener("click", () => setInside(!insOn));
 $("covbtn").addEventListener("click", () => setCov(!covOn));
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== "range") return;
   if (e.key === "h") toggleHow();
+  else if (e.key === "i") setInside(!insOn);
   else if (e.key === "c") setCov(!covOn);
 });
 $("thr").addEventListener("input", renderCov);
@@ -991,26 +1206,13 @@ addEventListener("resize", () => {
 });
 
 buildTape();
-(function buildCovTape() { // same geometry as the gauge tape
-  for (let i = 0; i <= 10; i++) {
-    const t = el("span");
-    t.style.left = `calc(${i * 10}% - ${i === 10 ? 1 : 0}px)`;
-    $("cvticks").append(t);
-  }
-  for (const b of BANDS) {
-    const w = (b.to - b.from) * 100 + "%";
-    const seg = el("span", "b-" + b.key);
-    seg.style.width = w;
-    $("cvbands").append(seg);
-    const name = el("span", null, b.name);
-    name.style.width = w;
-    $("cvnames").append(name);
-  }
-})();
+buildTape("cvticks", "cvbands", "cvnames"); // same geometry as the gauge tape
+buildTape("insticks", "insbands", "insnames");
 setGauge(null);
+renderInside(null, "idle");
 setQueue(null, []);
 renderHow(null);
-$("excol").append(el("p", "noex", `Ask from a phone at ${location.host}. Each answer's score breakdown replays here.`));
+$("excol").append(el("p", "noex", `Ask from a phone at ${location.host}.`));
 renderQuestion("", "No question yet").querySelector(".route").textContent = "";
 const params = new URLSearchParams(location.search);
 setHow(params.get("how") === "1");
@@ -1032,4 +1234,62 @@ if (mock.startsWith("check")) {
   send({ type: "working" }, 400);
   send({ type: "stage", stage: "scoring" }, 2000);
   send({ type: "stage", stage: "executing" }, 3500);
+} else if (mock === "inside" || mock === "how") {
+  // ?mock=inside[&layers=none] / ?mock=how: a synthetic result for layout only. Every number is random and
+  // labelled so on screen (explain.synthetic, layers_synthetic); nothing here comes from a run.
+  const m = mockResult(params.get("layers") !== "none");
+  setTimeout(() => {
+    onMessage({ data: JSON.stringify(m) });
+    if (mock === "inside") setInside(true); else setHow(true);
+  }, 300);
+}
+
+function mockResult(withLayers) {
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  const sig = (z) => 1 / (1 + Math.exp(-z));
+  const names = ["probe", "logprob_mean", "logprob_min", "question_chars", "sql_chars", "n_joins", "n_aggregates", "n_subqueries", "n_prompt", "n_gen", "executes"];
+  const group = { probe: "Internals", logprob_mean: "Token confidence", logprob_min: "Token confidence", executes: "Compiles" };
+  const raw = { probe: 0.41, logprob_mean: -0.19, logprob_min: -3.1, question_chars: 71, sql_chars: 188, n_joins: 2, n_aggregates: 1, n_subqueries: 0, n_prompt: 1460, n_gen: 52, executes: 1 };
+  const b0s = -0.35;
+  const stack_terms = names.map((n) => {
+    const weight = (rnd() - 0.5) * 1.6, mean = raw[n] * (0.8 + rnd() * 0.4), scale = Math.max(1e-3, Math.abs(raw[n]) * 0.5 + 0.2);
+    const scaled = (raw[n] - mean) / scale;
+    return { name: n, group: group[n] || "Size", weight, value: raw[n], mean, scale, scaled, contribution: weight * scaled };
+  });
+  const logit = b0s + stack_terms.reduce((s, t) => s + t.contribution, 0);
+  const groups = ["Internals", "Token confidence", "Size", "Compiles"].map((g) => ({ name: g, value: stack_terms.filter((t) => t.group === g).reduce((s, t) => s + t.contribution, 0), members: [] }));
+  const dims = Array.from({ length: 16 }, () => { const w = (rnd() - 0.5) * 0.08, h = (rnd() - 0.5) * 6, mean = (rnd() - 0.5); return { dim: Math.floor(rnd() * 2048), weight: w, activation: h, mean, contribution: w * (h - mean) }; })
+    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+  const b0 = 0.12, rest = -0.21;
+  const z = b0 + dims.reduce((s, d) => s + d.contribution, 0) + rest;
+  const p_raw = sig(z);
+  const layers = [];
+  for (let L = 0; L <= 36; L += 2) {
+    const zl = -1.2 + (L / 36) * 1.1 + (rnd() - 0.5) * 0.9;
+    const pt = 0.5 + Math.min(0.45, Math.max(0, (L / 36) * 0.3 + (rnd() - 0.5) * 0.08));
+    layers.push({ layer: L, p: +sig(zl).toFixed(4), z: +zl.toFixed(3), auroc: [+pt.toFixed(3), +(pt - 0.03).toFixed(3), +(pt + 0.03).toFixed(3)] });
+  }
+  const explain = {
+    synthetic: true, layer: 26, position: "mean_gen", n_layers: 36, centered: true, b0, z, p_raw, p_cal: sig(1.3 * z - 0.2),
+    platt_a: 1.3, platt_b: -0.2, dims: dims.map((d) => [d.dim, d.contribution]), rest, share_top20: 0.31, d: 2048,
+    stack_ref: b0s, groups, logit, needle: sig(logit), features: stack_terms.map((t) => ({ name: t.name, value: t.value, contrib: t.contribution })),
+    stack_terms, stack_intercept: b0s,
+    probe_terms: { layer: 26, position: "mean_gen", b0, z, centered: true, dims, rest, n_rest: 2048 - 16 },
+    model_card: { stack: "logistic regression with 11 inputs (StandardScaler, then logistic regression)", stack_inputs: 11,
+      probe: "StandardScaler -> PCA 256 -> L2 logistic, collapsed to one linear vector over 2,048 activations at layer 26, mean over SQL tokens",
+      probe_layer: 26, probe_position: "mean_gen", probe_dims: 2048, platt: { a: 1.3, b: -0.2 }, n_train: null, excluded_dbs: null, select_on: null, synthetic: true },
+    layer_auroc: layers.map((l) => ({ layer: l.layer, auroc: l.auroc[0] })), ece: null, track_record: {}, ms: 0.4,
+  };
+  const m = {
+    type: "result", job: { id: -2, db_id: "synthetic", question: "Synthetic test question: layout only, no run behind these numbers" }, queue: [],
+    db_id: "synthetic", question: "Synthetic test question: layout only, no run behind these numbers",
+    sql: "SELECT T1.name, COUNT(T2.id) AS n FROM synthetic_a AS T1 INNER JOIN synthetic_b AS T2 ON T1.id = T2.a_id GROUP BY T1.name ORDER BY n DESC LIMIT 5",
+    gen_seconds: 0, columns: ["name", "n"], rows: [["synthetic row", 0]], fake: true,
+    probe: { needle: +sig(logit).toFixed(4), probe: +p_raw.toFixed(4), calibrated: 0.5, layer: 26, position: "mean_gen", n_train: null, bird_probe_auroc: null },
+    explain,
+  };
+  if (withLayers) { m.layers = layers; m.layers_synthetic = true; }
+  if (params.get("legacy") === "1") for (const k of ["stack_terms", "stack_intercept", "probe_terms", "model_card"]) delete explain[k]; // older server
+  return m;
 }
