@@ -277,7 +277,8 @@
     }
     var narrow = mode === "narrow";
     var X = function (p, s) { return narrow ? [s, p] : [p, s]; };
-    var vbW = narrow ? W : L.totalP, vbH = narrow ? L.totalP : L.totalS;
+    // narrow: two lanes can need more than the panel (boxes keep a 120 px minimum); the whole map then scales down to fit
+    var vbW = narrow ? Math.max(W, Math.ceil(L.totalS)) : L.totalP, vbH = narrow ? L.totalP : L.totalS;
     var scale = Math.min(1, W / vbW);
 
     container.innerHTML = "";
@@ -329,6 +330,13 @@
         lines.forEach(function (l, k) { text(g, kx, ky + k * 15, l.t, l.cls); });
         el("rect", { x: xy[0] - 12 - fw, y: xy[1] - 13, width: fw, height: 26, "class": "jm-knock" }, g);
         text(g, xy[0] - 12, xy[1] + 7, lbl, "jm-factor", "end");
+        var right = Math.ceil(kx - 5 + kw + 2);   // the key lines must not run past the right edge either
+        if (right > vbW) {
+          vbW = right; scale = Math.min(1, W / vbW);
+          svg.setAttribute("viewBox", "0 0 " + vbW + " " + vbH);
+          svg.setAttribute("width", Math.round(vbW * scale));
+          svg.setAttribute("height", Math.round(vbH * scale));
+        }
       } else {
         el("rect", { x: xy[0] - fw / 2, y: xy[1] - 32, width: fw, height: 26, "class": "jm-knock" }, g);
         text(g, xy[0], xy[1] - 11, lbl, "jm-factor", "middle");

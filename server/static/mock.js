@@ -92,6 +92,7 @@
       audit: { ...a, original: undefined, sql: undefined, annotate_seconds: a.audit_seconds } });
   }
   $("link").textContent = "Mock fixture";
+  $("link").classList.remove("wait");
   fillDbs([DB, "california_schools", "codebase_community", "financial"]);
   loadPresets();
 

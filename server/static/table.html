@@ -27,6 +27,7 @@
   --caution: #d6a63e;
   --cruise: #5fae76;
   --diff: #4a4320;
+  --keep: #2a4034;       /* --cruise over --panel at ~25%: a joined row counted once */
   --caution-ink: var(--caution);
   --up: var(--cruise);   /* contribution that raises the needle: towards Cruise */
   --down: var(--ask);    /* contribution that lowers it: towards Ask */
@@ -40,7 +41,7 @@ html, body { height: 100%; }
 html { background: var(--panel); }
 body {
   margin: 0; background: var(--panel); color: var(--ink);
-  font: 400 1rem/1.4 "Poppins", sans-serif;
+  font: 400 1rem/1.4 "Poppins", sans-serif; font-variant-numeric: tabular-nums;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -60,13 +61,18 @@ h1 { margin: 0; font-size: 1.3rem; font-weight: 600; letter-spacing: 0.02em; }
   font: inherit; font-size: 0.85rem; font-weight: 600; color: var(--ink); background: transparent;
   border: 1.5px solid var(--ink); border-radius: 3px; padding: 0.3rem 0.95rem; cursor: pointer;
 }
+.tog, .seg button { transition: background-color 160ms ease-out, color 160ms ease-out; }
+.tog:hover, .seg button:hover { background: var(--panel-3); }
 .tog[aria-pressed="true"], .seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.tog u { text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 0.18em; } /* the key that opens it */
+main { transition: opacity 400ms ease-out; }
+body.down main { opacity: 0.5; }
 .tog:focus-visible, .seg button:focus-visible, #thr:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
 main {
   position: relative; overflow: hidden; flex: 1; min-height: 0; display: grid; grid-template-columns: 1.05fr 1fr; grid-template-rows: minmax(0, 1fr); gap: 0 2.6rem; padding: 1.2rem 2rem 0;
 }
-main > section { position: relative; z-index: 1; min-width: 0; min-height: 0; overflow: hidden; animation: var(--enter, none) 240ms var(--ease) both; }
+main > section { position: relative; z-index: 1; min-width: 0; min-height: 0; overflow: hidden; animation: var(--enter, none) 280ms var(--ease) both; }
 /* cloud layer: its box is the lower 58% of the panel; translateY sets how much of it shows (the needle decides) */
 #clouds { position: absolute; left: 0; right: 0; bottom: 0; height: 60%; z-index: 0; overflow: hidden; pointer-events: none; transform: translateY(90%); will-change: transform; }
 #clouds svg { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; }
@@ -81,8 +87,8 @@ main > section { position: relative; z-index: 1; min-width: 0; min-height: 0; ov
 body.how #clouds, body.ins #clouds, body.check #clouds, body.cov #clouds, body.sb #clouds, body.fail #clouds { display: none; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 /* shared-axis view change: the incoming view slides from the side the navigation moved towards */
-@keyframes enter-fwd { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
-@keyframes enter-back { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+@keyframes enter-fwd { from { opacity: 0; transform: translateX(1.5rem); } to { opacity: 1; transform: none; } }
+@keyframes enter-back { from { opacity: 0; transform: translateX(-1.5rem); } to { opacity: 1; transform: none; } }
 h2 { margin: 0 0 0.2rem; font-size: 1.45rem; font-weight: 600; line-height: 1.3; }
 h3 { margin: 0 0 0.5rem; font-size: 1.05rem; font-weight: 600; }
 .route { margin: 0 0 0.8rem; font-size: 0.85rem; font-weight: 500; color: var(--ink-2); }
@@ -197,12 +203,12 @@ body.fail #maincol, body.fail #excol { display: none; }
 /* one view at a time; the later ones win if two flags are ever set together */
 body.sb #howcol, body.sb #inscol, body.sb #checkcol, body.sb #covcol, body.fail #howcol, body.fail #inscol, body.fail #checkcol, body.fail #covcol, body.fail #sbcol,
 body.check #howcol, body.check #inscol, body.cov #howcol, body.cov #inscol, body.ins #howcol { display: none !important; }
-body.how #howcol { display: grid; animation: fade 300ms ease-out both; }
-body.ins #inscol { display: grid; animation: fade 300ms ease-out both; }
-body.check #checkcol { display: flex; flex-direction: column; animation: fade 300ms ease-out both; }
-body.cov #covcol { display: grid; animation: fade 300ms ease-out both; }
-body.sb #sbcol { display: grid; animation: fade 300ms ease-out both; }
-body.fail #failcol { display: block; animation: fade 300ms ease-out both; }
+body.how #howcol { display: grid; }
+body.ins #inscol { display: grid; }
+body.check #checkcol { display: flex; flex-direction: column; }
+body.cov #covcol { display: grid; }
+body.sb #sbcol { display: grid; }
+body.fail #failcol { display: block; }
 
 /* how: the two logistic regressions, weight by weight */
 #howcol { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: 0 3rem; align-content: start; }
@@ -289,10 +295,12 @@ body.fail #failcol { display: block; animation: fade 300ms ease-out both; }
 .lc.lab { align-items: flex-end; padding-right: 0.6rem; }
 .lc.lab .col, .lc.lab .atrk { width: auto; border: 0; }
 .lc.lab .atrk { display: flex; align-items: flex-end; font-size: 0.72rem; color: var(--ink-2); white-space: nowrap; }
-.lc { --i: 0; display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 0.3rem 0 0.4rem; opacity: 0; transform: translateY(10px); }
+.lc { --i: 0; position: relative; display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 0.3rem 0 0.4rem; opacity: 0; transform: translateY(10px); }
 .lc.on { opacity: 1; transform: none; }
-.lc.used { outline: 1.5px solid transparent; outline-offset: 0; transition: outline-color 360ms ease-out; }
-.lc.used.hit { outline-color: var(--ink); }
+/* the used layer's frame; its two numbers sit on panel colour so the frame never runs through them */
+.lc.used::before { content: ""; position: absolute; inset: 0; border: 1.5px solid transparent; transition: border-color 360ms ease-out; pointer-events: none; }
+.lc.used.hit::before { border-color: var(--ink); }
+.lc.used .pv, .lc.used .au { position: relative; padding: 0 0.15em; background: var(--panel); }
 .lc .tag { opacity: 0; transition: opacity 300ms ease-out 200ms; }
 .lc.hit .tag, .lc.lab .tag { opacity: 1; }
 .lc .pv { height: 1.35em; font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -305,7 +313,8 @@ body.fail #failcol { display: block; animation: fade 300ms ease-out both; }
 .lc .atrk { position: relative; width: min(100%, 2.4rem); height: 2.4rem; margin-top: 0.2rem; border-bottom: 1px solid var(--rule); }
 .lc .abar2 { position: absolute; left: 25%; right: 25%; bottom: 0; background: var(--ink-3); transform: scaleY(0); transform-origin: bottom center; }
 .lc .aci { position: absolute; left: 50%; width: 0; border-left: 1.5px solid var(--ink); }
-.lc .tag { margin-top: 0.3rem; height: 1.3em; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+.lc .tag { position: absolute; top: calc(100% + 0.3rem); left: 50%; transform: translateX(-50%); font-size: 0.72rem; font-weight: 600; white-space: nowrap; }
+.strip { padding-bottom: 1.6rem; }
 .ins-empty { margin: 1.4rem 0 0; font-size: 1.05rem; color: var(--ink-2); max-width: 48ch; }
 .ins-r .instrument { grid-template-columns: 1fr; padding-top: 0.6rem; }
 .ins-r .readout { font-size: 4.2rem; }
@@ -344,7 +353,7 @@ body.fail #failcol { display: block; animation: fade 300ms ease-out both; }
 .fgrid .rh.src { color: var(--ink); font-weight: 600; }
 .fgrid .slot { position: relative; height: var(--ch); border: 1px solid var(--rule); }
 /* each cell is one joined row. It fans out from its row's first slot (--dx: that slot's offset), then the
-   duplicates slide back onto it (collapse) and return hollow: counted once after the correction */
+   duplicates slide back onto it (collapse) and return: the kept cell green (counted once after the fix), repeats amber */
 .fgrid .c {
   position: absolute; inset: -1px; display: flex; align-items: center; justify-content: center;
   background: var(--diff); border: 1px solid var(--caution); font-style: normal; font-weight: 600; color: var(--ink);
@@ -353,8 +362,13 @@ body.fail #failcol { display: block; animation: fade 300ms ease-out both; }
 }
 .fgrid .c.on { opacity: 1; transform: none; }
 .fgrid.collapse .c.dup { opacity: 0; transform: translateX(var(--dx, 0px)) scale(0.85); transition-duration: 260ms, 420ms; }
-.fgrid.once .c.dup { opacity: 1; transform: none; background: transparent; border-color: var(--bezel); color: var(--ink-3); }
-.fgrid.once .c.keep { border-color: var(--cruise); background: var(--panel-3); }
+.fgrid.once .c.dup { opacity: 1; transform: none; }
+.fgrid.once .c.keep { border-color: var(--cruise); background: var(--keep); }
+.fkey { display: flex; gap: 0.3rem 1.4rem; margin: 0.45rem 0 0; font-size: 0.8rem; color: var(--ink-2); opacity: 0; transition: opacity 300ms ease-out; }
+.fkey.on { opacity: 1; }
+.fkey span::before { content: ""; display: inline-block; width: 0.8rem; height: 0.8rem; margin-right: 0.4rem; vertical-align: -0.1rem; border: 1px solid; }
+.fkey .k-keep::before { background: var(--keep); border-color: var(--cruise); }
+.fkey .k-dup::before { background: var(--diff); border-color: var(--caution); }
 .rv b.live { color: var(--ink-2); }
 .factor { min-width: 0; }
 .factor small { display: block; margin-bottom: 0.1rem; font-size: 1rem; font-weight: 600; color: var(--ink-2); }
@@ -551,12 +565,12 @@ footer b { font-weight: 600; }
   <span id="probeline"></span>
   <span id="link">Connecting</span>
   <div class="views">
-    <button id="howbtn" class="tog" type="button" aria-pressed="false" aria-controls="howcol">How</button>
-    <button id="insbtn" class="tog" type="button" aria-pressed="false" aria-controls="inscol">Inside</button>
-    <button id="covbtn" class="tog" type="button" aria-pressed="false" aria-controls="covcol">Coverage</button>
-    <button id="sbbtn" class="tog" type="button" aria-pressed="false" aria-controls="sbcol">Scoreboard</button>
-    <button id="failbtn" class="tog" type="button" aria-pressed="false" aria-controls="failcol">Failures</button>
-    <a id="boardlink" class="tog" href="board.html" target="altimeter-board" rel="noopener">Board</a>
+    <button id="howbtn" aria-keyshortcuts="h" class="tog" type="button" aria-pressed="false" aria-controls="howcol"><u>H</u>ow</button>
+    <button id="insbtn" aria-keyshortcuts="i" class="tog" type="button" aria-pressed="false" aria-controls="inscol"><u>I</u>nside</button>
+    <button id="covbtn" aria-keyshortcuts="c" class="tog" type="button" aria-pressed="false" aria-controls="covcol"><u>C</u>overage</button>
+    <button id="sbbtn" aria-keyshortcuts="s" class="tog" type="button" aria-pressed="false" aria-controls="sbcol"><u>S</u>coreboard</button>
+    <button id="failbtn" aria-keyshortcuts="f" class="tog" type="button" aria-pressed="false" aria-controls="failcol"><u>F</u>ailures</button>
+    <a id="boardlink" class="tog" href="board.html" target="altimeter-board" rel="noopener" aria-keyshortcuts="b"><u>B</u>oard</a>
   </div>
 </header>
 <main>

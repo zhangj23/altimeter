@@ -101,9 +101,9 @@ ins.sd-g .sd-t::after {
 /* copy row: same control as "Copy corrected SQL" in the phone UI */
 .sd-fixrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; }
 .sd-copy {
-  padding: 8px 16px; min-height: 40px; border: 1.5px solid var(--ink); border-radius: 3px; background: transparent;
+  padding: 8px 16px; min-height: 44px; border: 1.5px solid var(--ink); border-radius: 3px; background: transparent;
   font: 600 var(--t0)/1.2 "Poppins", sans-serif; color: var(--ink); cursor: pointer;
 }
-.sd-copy:active { transform: translateY(1px); }
+.sd-copy:active { transform: translateY(1px); background: var(--panel-3); }
 .sd-copy:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .sd-copied { font-size: var(--t0); font-weight: 400; color: var(--ink-2); }

@@ -12,7 +12,7 @@ const VISIBLE = 12;
 const KEEP = 40;
 const STEP = 150;     // ms per flap, same as --step
 const STAGGER = 15;   // ms between neighbouring cells
-const W = { time: 5, db: 18, reading: 4, band: 7, status: 12, detail: 10 };
+const W = { time: 5, db: 18, reading: 4, band: 7, status: 12, detail: 13 }; // same cell counts as the grid in board.css
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS = "0123456789";
 
@@ -52,8 +52,10 @@ function setCell(cell, ch, delay, cycle, instant) {
 function setMono(field, text, width, opts = {}) {
   while (field.children.length < width) field.append(el("span", "c"));
   while (field.children.length > width) field.lastChild.remove();
-  const t = (text || "").slice(0, width);
-  for (let i = 0; i < width; i++) setCell(field.children[i], t[i] || "", i * STAGGER, opts.cycle !== false, opts.instant);
+  let t = text || "";
+  if (t.length > width) t = t.slice(0, width - 1) + "…"; // a cut value says so
+  if (opts.right) t = t.padStart(width, " ");
+  for (let i = 0; i < width; i++) setCell(field.children[i], (t[i] || "").trim(), i * STAGGER, opts.cycle !== false, opts.instant);
   field.className = "f " + (opts.cls || "");
 }
 
@@ -121,6 +123,7 @@ function newRow(id, kind, job) {
 }
 
 function paint(r, instant) {
+  tally(r);
   const f = (k) => r.el.querySelector(`.f[data-k="${k}"]`);
   setMono(f("time"), hhmm(r.at), W.time, { instant });
   setMono(f("db"), String(r.db || "").startsWith("upload:") ? "uploaded data" : r.db, W.db, { instant });
@@ -130,6 +133,7 @@ function paint(r, instant) {
   setMono(f("band"), b ? b.name : r.uncal && r.reading != null ? "UNCAL" : "", W.band, { instant, cls: b ? b.key : r.uncal ? "dim" : "" });
   setMono(f("status"), r.status, W.status, { instant, cls: r.cls });
   setMono(f("detail"), r.detail, W.detail, { instant, cls: r.cls });
+  f("detail").title = r.detailFull || "";
 }
 
 function upsert(id, kind, job) {
@@ -145,18 +149,36 @@ const needleOf = (m) => {
   return Number.isFinite(v) ? v : null;
 };
 const fmtS = (s) => (s == null ? "" : `${s.toFixed(1)} s`);
-// A number in at most 4 characters where possible: 355, 3.35, 117, 0.38.
-const fmtShort = (v, text) => {
-  const x = Number(v);
-  if (!Number.isFinite(x)) return text == null ? "" : String(text);
-  if (Number.isInteger(x) && Math.abs(x) < 1e6) return String(x);
-  return Math.abs(x) >= 100 ? String(Math.round(x)) : String(Number(x.toPrecision(3)));
-};
-// before → after; the server's own text when it fits, else a shortened pair.
+// Ways to write one headline number, most exact first: the server's text, then shorter roundings.
+// 25,096,044 -> 25096044, 25.1M, 25M; 116.6527 -> 116.7, 117; 0.375 stays. Never rounds into the integer part.
+function forms(v, text) {
+  const out = []; // one entry per rounding step, repeats kept, so both sides of the arrow step together
+  const add = (t) => { if (t) out.push(t); };
+  if (text != null) { add(String(text)); add(String(text).replace(/,/g, "")); }
+  const x = v == null ? NaN : Number(v);
+  if (!Number.isFinite(x)) return out;
+  const a = Math.abs(x);
+  if (a >= 1e4) {
+    const [d, u] = a >= 1e9 ? [1e9, "B"] : a >= 1e6 ? [1e6, "M"] : [1e3, "K"];
+    // keep trailing zeros so both sides show the same precision (36.0M → 31.5M, not 36M → 31.5M)
+    for (const p of [2, 1, 0]) { const y = (x / d).toFixed(p); if (Math.abs(+y) < 1000) add(y + u); }
+  } else {
+    const intDigits = a >= 1 ? Math.floor(Math.log10(a)) + 1 : 0;
+    for (const p of [4, 3, 2, 1]) if (p >= intDigits) add(x.toPrecision(p));
+  }
+  return out;
+}
+// before → after in W.detail cells: both sides at the same rounding step, the most exact that fits.
 function beforeAfter(h) {
   if (!h || h.before_text == null || h.after_text == null) return "";
-  const full = `${h.before_text} → ${h.after_text}`;
-  return full.length <= W.detail ? full : `${fmtShort(h.before, h.before_text)} → ${fmtShort(h.after, h.after_text)}`;
+  const A = forms(h.before, h.before_text), B = forms(h.after, h.after_text);
+  for (let k = 0; k < Math.max(A.length, B.length); k++) {
+    const t = `${A[Math.min(k, A.length - 1)]} → ${B[Math.min(k, B.length - 1)]}`;
+    if (t.length <= W.detail) return t;
+  }
+  const half = Math.floor((W.detail - 3) / 2);
+  const cut = (t) => (t.length <= half ? t : t.slice(0, half - 1) + "…");
+  return `${cut(A[A.length - 1])} → ${cut(B[B.length - 1])}`;
 }
 
 function answerSeconds(r, m) {
@@ -198,6 +220,7 @@ function onCheck(m) {
   if (r.flagged) {
     r.status = "DOUBLE COUNT"; r.cls = "ask";
     r.detail = beforeAfter(c.headline);
+    r.detailFull = c.headline ? `${c.headline.before_text} → ${c.headline.after_text}` : "";
   } else if (failed) { r.status = "UNCHECKED"; r.cls = "dim"; r.detail = ""; }
   else { r.status = "CLEAR"; r.cls = "cruise"; r.detail = ""; }
   paint(r);
@@ -209,45 +232,79 @@ function onSnapshot(m) {
   for (const q of m.queue || []) { const r = upsert(q.id, "job", q); if (!r.status) { r.status = "QUEUED"; r.cls = "dim"; paint(r); } }
 }
 
-/* ---------- counters ---------- */
+/* ---------- counters: kept apart from the rows, which are trimmed to KEEP ---------- */
+const landed = new Map(); // id -> answer seconds (null when unknown)
+const flaggedIds = new Set();
+function tally(r) {
+  if (r.status === "LANDED") landed.set(r.id, r.seconds); else landed.delete(r.id);
+  if (r.flagged) flaggedIds.add(r.id); else flaggedIds.delete(r.id);
+}
 function counters(instant) {
-  const all = [...rows.values()];
-  const answered = all.filter((r) => r.status === "LANDED");
-  const flagged = all.filter((r) => r.flagged).length;
-  const secs = answered.map((r) => r.seconds).filter((s) => s != null).sort((a, b) => a - b);
+  const secs = [...landed.values()].filter((s) => s != null).sort((a, b) => a - b);
   const med = secs.length ? (secs.length % 2 ? secs[(secs.length - 1) / 2] : (secs[secs.length / 2 - 1] + secs[secs.length / 2]) / 2) : null;
-  setMono($("c-answered"), String(answered.length), 3, { instant });
-  setMono($("c-flagged"), String(flagged), 3, { instant });
-  setMono($("c-median"), fmtS(med), 6, { instant });
+  setMono($("c-answered"), String(landed.size), 3, { instant, right: true });
+  setMono($("c-flagged"), String(flaggedIds.size), 3, { instant, right: true });
+  setMono($("c-median"), med == null ? "" : `${med.toFixed(med < 100 ? 1 : 0)} s`, 6, { instant, right: true });
 }
 
 function handle(m) {
+  if (m.type !== "snapshot" || m.last || m.current || (m.queue || []).length) attractRow(false);
   if (m.type === "snapshot") onSnapshot(m);
   else if (m.type === "check") onCheck(m);
   else if (m.job) onJob(m);
   counters();
+  attractRow(true);
 }
 
-/* ---------- socket ---------- */
+/* ---------- before the first question: one row saying where to ask (only when the address works from a phone) ---------- */
+const LOOPBACK = /^(localhost|127\.|\[::1\]|0\.0\.0\.0)/;
+const ATTRACT_Q = "Ask from a phone"; // beside the address in the database column
+let attract = null;
+function attractRow(on) {
+  if (on && !attract && !rows.size && !LOOPBACK.test(location.hostname)) {
+    attract = el("div", "row attract");
+    const time = el("div", "f"), db = el("div", "f"), q = el("div", "f q"), rd = el("div", "f"), band = el("div", "f"), st = el("div", "f"), det = el("div", "f");
+    attract.append(time, db, q, rd, band, st, det);
+    rowsEl.prepend(attract);
+    while (rowsEl.children.length > VISIBLE) rowsEl.lastChild.remove();
+    setMono(time, "", W.time, { instant: true });
+    setMono(db, location.host, W.db); // the address a phone opens
+    setQuestion(q, ATTRACT_Q);
+    for (const [f, w] of [[rd, W.reading], [band, W.band], [det, W.detail]]) setMono(f, "", w, { instant: true });
+    setMono(st, "BOARDING", W.status, { cls: "cruise" });
+  } else if (!on && attract) { attract.remove(); attract = null; fillBlank(); }
+}
+
+/* ---------- socket: a lost link says so in the header and greys the board until it is back ---------- */
 let ws = null, retry = 1000;
+function setLink(up) {
+  document.body.classList.toggle("stale", !up);
+  setMono($("link"), up ? "" : "NO LINK", 7, { cls: "ask", instant: up });
+}
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/table`);
-  ws.onopen = () => { retry = 1000; };
+  ws.onopen = () => { retry = 1000; setLink(true); };
   ws.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
-  ws.onclose = () => { setTimeout(connect, retry); retry = Math.min(retry * 2, 10000); };
+  ws.onclose = () => { setLink(false); setTimeout(connect, retry); retry = Math.min(retry * 2, 10000); };
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") connect(); });
-connect();
 fillBlank();
 counters(true);
+setMono($("link"), "", 7, { instant: true });
+connect();
 
+// Questions are cut to the column by measuring Poppins; refit once it has loaded and whenever the width changes.
+const refit = () => {
+  for (const r of rows.values()) if (r.el.isConnected) setQuestion(r.el.querySelector(".f.q"), r.question, true);
+  if (attract) setQuestion(attract.querySelector(".f.q"), ATTRACT_Q, true);
+};
+if (document.fonts) document.fonts.load("500 20px Poppins").then(refit, () => {});
 let resizeT = null;
 addEventListener("resize", () => {
   clearTimeout(resizeT);
-  resizeT = setTimeout(() => { for (const r of rows.values()) if (r.el.isConnected) setQuestion(r.el.querySelector(".f.q"), r.question, true); }, 120);
+  resizeT = setTimeout(refit, 120);
 });
-
 // Re-flap every visible cell from blank, using the rows already on the board (for checking the effect).
 window.board = {
   reflap() {

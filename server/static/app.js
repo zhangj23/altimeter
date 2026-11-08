@@ -310,6 +310,7 @@ function newRun(question, db_id) {
     if (!run.classList.contains("done")) return;
     const c = run.classList.toggle("collapsed");
     head.setAttribute("aria-expanded", String(!c));
+    run.classList.toggle("opened", !c); // reopening eases the card back in
   };
   head.addEventListener("click", toggle);
   head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
@@ -677,7 +678,8 @@ function fillReply(card, r, secs) {
     body.append(answerLine(r));
     if (!r.error && r.rows && r.rows.length && !(r.rows.length === 1 && r.rows[0].length === 1)) {
       body.append(resultTable(r.columns, r.rows, PREVIEW_ROWS));
-      body.append(el("p", "count", rowCount(r.rows.length, r.rows_capped, Math.min(PREVIEW_ROWS, r.rows.length))));
+      // the answer line already gives the row count; only say so when the preview cuts rows off
+      if (r.rows.length > PREVIEW_ROWS) body.append(el("p", "count", `Showing ${PREVIEW_ROWS} of ${fmtInt(r.rows.length)}`));
     }
     const sqlNode = r.audit && r.audit.flagged && r.sql ? hlBlock(r.sql, r.audit.highlights) : sqlBlock(r.sql, null);
     const box = collapsible(sqlNode);
@@ -780,6 +782,7 @@ function onMessage(ev) {
 function setLink(up) {
   $("radio").classList.toggle("on", !up);
   $("link").textContent = up ? "Local link" : "No link";
+  $("link").classList.remove("wait");
   $("link").classList.toggle("down", !up);
 }
 
@@ -944,12 +947,17 @@ function copyFixButton(c, det) {
   said.setAttribute("aria-live", "polite");
   const done = (text) => {
     said.textContent = text;
+    said.classList.remove("on");
+    void said.offsetWidth; // restart the fade on a second tap
+    said.classList.add("on");
     clearTimeout(btn._t);
-    btn._t = setTimeout(() => { said.textContent = ""; }, 2500);
+    btn._t = setTimeout(() => { said.textContent = ""; said.classList.remove("on"); }, 2500);
   };
   const selectIt = () => {
-    det.open = true;
-    const pre = det.querySelector("pre");
+    let pre;
+    if (det && det.isConnected) { det.open = true; pre = det.querySelector("pre"); }
+    else pre = (row.closest(".sheet, .audit") || document).querySelector(".sd-after .sd-code");
+    if (!pre) { done("Copy failed."); return; }
     const range = document.createRange();
     range.selectNodeContents(pre);
     const sel = getSelection();
@@ -980,6 +988,9 @@ function copyFixButton(c, det) {
   row.append(btn, said);
   return row;
 }
+
+// The SQL diff shows the corrected query in full, so the rewrite disclosure and the highlighted copy are left out.
+const hasDiff = (c) => !!(window.SqlDiff && c && c.sql && !c.error);
 
 /* Explanation, "was this intended?" note, copy button. Returns [nodes, rewrite <details> or null]. */
 function fixParts(a) {
@@ -1027,8 +1038,8 @@ function renderAudit(a, r) {
   if (r && r.sql) sec.append(mapAndDiff(r.db_id, { ...a, sql: r.sql, flagged: true }));
   const [nodes, det] = fixParts(a);
   sec.append(...nodes);
-  if (det) sec.append(det);
-  else sec.append(el("p", "note", "No automatic rewrite for this query."));
+  if (!a.corrected) sec.append(el("p", "note", "No automatic rewrite for this query."));
+  else if (det && !hasDiff(a.corrected)) sec.append(det);
   return sec;
 }
 
@@ -1089,17 +1100,30 @@ function renderCheck(d) {
   sheet.append(cl);
 
   const body = el("section");
-  body.append(el("p", "tag", "SQL as written"));
-  body.append(d.flagged ? hlBlock(d.sql, d.highlights) : sqlBlock(d.sql, null));
-  if (d.flagged && d.highlights && d.highlights.length) {
-    body.append(el("p", "note", "Red: the aggregate. Yellow: the JOINs that repeat its rows."));
+  const diffed = d.flagged && hasDiff(d.corrected);
+  if (diffed) { // the diff above already shows both queries: keep only what the query returned as written
+    if (!o.error && o.rows) {
+      body.append(el("p", "tag", "Result as written"));
+      if (o.rows.length === 1 && o.rows[0].length === 1) {
+        const p = el("p", "ans");
+        p.append(el("b", null, fmtCell(o.rows[0][0])));
+        body.append(p);
+      } else if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
+      body.append(el("p", "count", rowCount(o.rows.length, o.rows_capped, 5)));
+    }
+  } else {
+    body.append(el("p", "tag", "SQL as written"));
+    body.append(d.flagged ? hlBlock(d.sql, d.highlights) : sqlBlock(d.sql, null));
+    if (d.flagged && d.highlights && d.highlights.length) {
+      body.append(el("p", "note", "Red: the aggregate. Yellow: the JOINs that repeat its rows."));
+    }
+    if (!o.error && o.rows) {
+      if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
+      body.append(el("p", "count", rowCount(o.rows.length, o.rows_capped, 5)));
+    }
+    if (det) body.append(det);
   }
-  if (!o.error && o.rows) {
-    if (o.rows.length) body.append(resultTable(o.columns, o.rows, 5));
-    body.append(el("p", "count", rowCount(o.rows.length, o.rows_capped, 5)));
-  }
-  if (det) body.append(det);
-  sheet.append(body);
+  if (body.children.length) sheet.append(body);
   $("checkOut").replaceChildren(sheet);
   requestAnimationFrame(() => sheet.scrollIntoView({ block: "start", behavior: smoothScroll() }));
 }

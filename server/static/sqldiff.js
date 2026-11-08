@@ -398,7 +398,7 @@
       if (animate === "auto" && "IntersectionObserver" in window) {
         const io = new IntersectionObserver((es) => {
           if (es.some((e) => e.isIntersecting)) { io.disconnect(); play(); }
-        }, { threshold: 0.2 });
+        }, { threshold: 0, rootMargin: "0px 0px -15% 0px" }); // a diff taller than the screen still plays
         io.observe(root);
       } else requestAnimationFrame(play);
     }

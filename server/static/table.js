@@ -155,6 +155,8 @@ const G = {
 const setGauge = (score, mode, animate) => G.main.apply(score, mode, animate);
 const setInsGauge = (score, mode, animate) => G.ins.apply(score, mode, animate);
 
+// Where a phone can ask from; a loopback address would not reach the laptop from a phone, so it is left out.
+const askHere = () => (/^(localhost|127\.|\[::1\]|0\.0\.0\.0)/.test(location.hostname) ? "Ask from a phone on this network." : `Ask from a phone at ${location.host}.`);
 const dbName = (d) => (typeof d === "string" && d.startsWith("upload:") ? "uploaded data" : d);
 const UNCAL = "Needle not calibrated for uploaded data";
 function needleOf(r) {
@@ -441,7 +443,7 @@ function sigmoidFigure(logit, needle, caption) {
   svg.append(curve, sv("line", { class: "drop", x1: X(zc), x2: X(zc), y1: Y(0), y2: Y(needle) }),
     sv("line", { class: "drop", x1: X(0), x2: X(zc), y1: Y(needle), y2: Y(needle) }),
     sv("circle", { class: "pt", cx: X(zc), cy: Y(needle), r: 3.5 }),
-    sv("text", { x: X(0) + 3, y: Y(1) + 2, "text-anchor": "start" }, "1"), sv("text", { x: X(0) + 3, y: Y(0.5) - 2 }, "0.5"),
+    sv("text", { x: X(0) + 3, y: Y(1) + 2, "text-anchor": "start" }, "1"), sv("text", { x: m.l, y: Y(0.5) - 3 }, "0.5"),
     sv("text", { x: m.l, y: H - 2 }, "−5"), sv("text", { x: W - m.r, y: H - 2, "text-anchor": "end" }, "+5"),
     sv("text", { x: X(0), y: H - 2, "text-anchor": "middle" }, "logit"));
   const fig = el("div", "sig");
@@ -504,16 +506,16 @@ function renderHow(ex, r, animate) {
   const vals = [...au.values()];
   const lo = 0.5, hi = vals.length ? Math.max(0.5001, ...vals) : 1;
   const a = el("div", "how-block");
-  a.append(el("h3", null, `${nL} layers, the probe reads one`));
+  a.append(el("h3", null, `Embeddings + ${nL} layers, the probe reads one`));
   const strip = el("div", "layers");
   for (let Li = 0; Li <= nL; Li++) {
     const c = el("span", Li === ex.layer ? "used" : null);
     if (au.has(Li)) c.style.background = rampColor((au.get(Li) - lo) / (hi - lo));
-    c.title = `${Li === 0 ? "Embedding" : "Layer " + Li}: ${au.has(Li) ? "AUROC " + au.get(Li).toFixed(3) : "not measured"}${Li === ex.layer ? ", used" : ", not used"}`;
+    c.title = `${Li === 0 ? "Embeddings (layer 0)" : "Layer " + Li}: ${au.has(Li) ? "AUROC " + au.get(Li).toFixed(3) : "not measured"}${Li === ex.layer ? ", used" : ", not used"}`;
     strip.append(c);
   }
   const labels = el("div", "layer-labels");
-  const left = el("span", null, "Embedding");
+  const left = el("span", null, "Embeddings");
   left.style.left = "0";
   const right = el("span", null, `Layer ${nL}`);
   right.style.right = "0";
@@ -675,7 +677,7 @@ function pipeFinish(r) { // the result: every cell settles to the worker's numbe
   for (const [key, c] of pipe.cells) {
     const s = server[key] != null ? server[key] : pipe.measured.get(key);
     if (s != null) pipeSettle(key, s);
-    else { c.node.classList.remove("live"); c.node.classList.add("done", "skip"); c.t.textContent = key === "scoring" ? "no probe" : "not run"; pipeBar(c, 0); }
+    else { c.node.classList.remove("live"); c.node.classList.add("done", "skip"); c.t.textContent = key === "scoring" ? (layer != null ? "not timed" : "no probe") : "not run"; pipeBar(c, 0); }
   }
   const total = (r && r.timing && num(r.timing.worker_s)) || null;
   if (total != null) { const c = pipe.cells.get("audit"); c.node.title = `Worker total ${total.toFixed(2)} s`; }
@@ -869,7 +871,9 @@ function fanStrip(fo, f, h) {
     });
   });
   const box = el("div", "fbox");
-  box.append(el("p", "fcap", cap), grid);
+  const key = el("p", "fkey"); // shown once the copies are back: which cell is counted once, which is a repeat
+  key.append(el("span", "k-keep", "counted once after the fix"), el("span", "k-dup", "repeat made by the JOIN"));
+  box.append(el("p", "fcap", cap), grid, key);
   // --dx: how far each copy sits from its row's first cell, so it can fan out from there and collapse back
   const measure = () => {
     const firstX = new Map();
@@ -912,7 +916,7 @@ function fanStrip(fo, f, h) {
     grid.style.setProperty("--ch", `${ch.toFixed(1)}px`);
     measure();
   };
-  return { node, cells, heads, grid, size };
+  return { node, cells, heads, grid, size, key };
 }
 
 // Tweens a headline number shown as text ("355", "116.6527", "1,234"): same decimals, same grouping.
@@ -967,7 +971,7 @@ function showCheck(m, animate) {
 
   // fan-out grid (first finding with one). The story, in order: the source rows appear; each fans out into its
   // joined copies while the number as written climbs; the copies collapse back onto one row each while the
-  // corrected number counts down from it; the copies return hollow; the strike; the ratio; the why.
+  // corrected number counts down from it; the copies return (kept rows green, repeats amber); the strike; the ratio; the why.
   const fo = flagged ? (c.findings || []).map((f) => f.fanout).find((x) => x && x.grid && x.grid.cells && x.grid.cells.length) : null;
   const fanN = fo ? fo.grid.cells.length : 0;
   const stag = Math.min(45, 1100 / Math.max(1, fanN));
@@ -1047,10 +1051,10 @@ function showCheck(m, animate) {
     ph(fan.node.firstChild, T0.fan);
     ph(fan.node.lastChild, T0.factor);
     fan.cells.forEach((x, i) => at(T0.cells + i * stag, () => { x.classList.add("on"); if (x.classList.contains("keep")) fan.heads[Number(x.dataset.row)].classList.add("src"); }));
-    if (h && anim) { // collapse onto one per row, then the duplicates come back hollow
+    if (h && anim) { // collapse onto one per row, then the copies come back: kept green, repeats amber
       at(K.collapse, () => fan.grid.classList.add("collapse"));
-      at(K.once, () => { fan.grid.classList.remove("collapse"); fan.grid.classList.add("once"); });
-    } else if (h) fan.grid.classList.add("once");
+      at(K.once, () => { fan.grid.classList.remove("collapse"); fan.grid.classList.add("once"); fan.key.classList.add("on"); });
+    } else if (h) { fan.grid.classList.add("once"); fan.key.classList.add("on"); }
   }
 
   const body = el("div", "ck-body");
@@ -1069,7 +1073,16 @@ function showCheck(m, animate) {
     const w = mapBox.clientWidth || why.clientWidth;
     if (!w || (!play && w === mapW && mapBox.firstChild)) return;
     mapW = w;
-    JoinMap.render(mapBox, schema, { ...c, sql: c.sql || "" }, { mode: "wide", neighbours: false, width: w, animate: !!play });
+    // The map draws 11 px labels; lay it out narrower and enlarge the SVG so they show at 0.72rem or more.
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const k = Math.max(1, (0.72 * rem) / 11);
+    JoinMap.render(mapBox, schema, { ...c, sql: c.sql || "" }, { mode: "wide", neighbours: false, width: w / k, animate: !!play });
+    const svg = mapBox.querySelector("svg");
+    if (!svg || !svg.viewBox.baseVal.width) return;
+    const sw = Number(svg.getAttribute("width")), sh = Number(svg.getAttribute("height"));
+    const label = 11 * (sw / svg.viewBox.baseVal.width) * k; // px of its smallest labels at this size
+    mapBox.hidden = label < 0.6 * rem; // a query with many tables shrinks it past reading; the explanation names them
+    if (!mapBox.hidden) { svg.setAttribute("width", Math.round(sw * k)); svg.setAttribute("height", Math.round(sh * k)); }
   };
   if (flagged) {
     if (h) why.append(el("p", "vword", "Double counting"));
@@ -1287,14 +1300,15 @@ function drawCurve(rows, t) {
   });
   curvePts = pts;
   const all = right / n;
-  const yMin = Math.max(0, Math.floor(Math.min(all, ...pts.map((p) => p.a)) * 10) / 10 - 0.1);
+  const yMin = Math.max(0, Math.floor(Math.min(all, ...pts.map((p) => p.a)) * 10) - 1) / 10;
   const X = (c) => m.l + c * (W - m.l - m.r);
   const Y = (a) => m.t + (1 - (a - yMin) / (1 - yMin)) * (H - m.t - m.b);
   curveX = (px) => (px - m.l) / (W - m.l - m.r);
   const small = (0.78 * fs).toFixed(1);
   const mid = (0.9 * fs).toFixed(1);
 
-  for (let a = Math.ceil(yMin * 10) / 10; a <= 1.0001; a += 0.1) {
+  for (let i = Math.round(yMin * 10); i <= 10; i++) {
+    const a = i / 10;
     svg.append(sv("line", { class: "grid-l", x1: m.l, x2: W - m.r, y1: Y(a), y2: Y(a) }));
     svg.append(sv("text", { x: m.l - 0.5 * fs, y: Y(a) + 0.3 * fs, "text-anchor": "end", "font-size": small }, pct(a)));
   }
@@ -1412,6 +1426,7 @@ function onMessage(ev) {
 function setLink(up) {
   $("link").textContent = up ? "Live" : "No link to gateway";
   $("link").classList.toggle("down", !up);
+  document.body.classList.toggle("down", !up); // the screen dims: what it shows may be stale
 }
 
 function connect() {
@@ -1448,7 +1463,7 @@ function layerCell(x, i, usedLayer, dense) {
   const p = Number(x.p);
   const hasP = Number.isFinite(p);
   // With every layer shown, numbers only on every 4th layer and the used one; the rest stay in the tooltip.
-  const labelled = !dense || x.layer % 4 === 0 || x.layer === usedLayer;
+  const labelled = !dense || x.layer === usedLayer || (x.layer % 4 === 0 && (usedLayer == null || Math.abs(x.layer - usedLayer) > 2)); // no label crowding the used one
   const pv = el("span", "pv", !labelled ? "" : hasP ? p.toFixed(2) : "--");
   if (hasP) pv.style.color = bandInk(bandOf(p).key);
   const colm = el("div", "col");
@@ -1496,7 +1511,7 @@ function renderInside(r, mode) { // mode: idle | working | animate | still
   if (mode === "idle" || !r) {
     $("insq").textContent = "Inside the model";
     $("insroute").textContent = "";
-    strip.append(el("p", "ins-empty", `Ask from a phone at ${location.host}.`));
+    strip.append(el("p", "ins-empty", askHere()));
     setInsGauge(null);
     return;
   }
@@ -1524,7 +1539,9 @@ function renderInside(r, mode) { // mode: idle | working | animate | still
   const lab = el("div", "lc lab on"); // row label for the AUROC track
   lab.append(el("span", "pv"), el("div", "col"), el("span", "ln"), el("span", "atrk", "AUROC"), el("span", "au"), el("span", "tag"));
   grid.append(lab, ...cells);
-  strip.append(grid, el("p", "cap", `Each layer: its own probe. Needle uses layer ${usedLayer != null ? usedLayer : "[TBD]"} + other signals.`));
+  const nP = layers.length, has0 = layers[0].layer === 0;
+  const probes = has0 ? `${nP} probes (embeddings + ${nP - 1} layers)` : `${nP} probes, one per layer`;
+  strip.append(grid, el("p", "cap", `${probes}. Needle: layer ${usedLayer != null ? usedLayer : "[TBD]"} + other signals.`));
   const anim = mode === "animate" && !reduced();
   const fin = (animate) => setInsGauge(nd, "noprobe", animate);
   if (!anim) {
@@ -1598,6 +1615,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "i") setInside(!insOn);
   else if (e.key === "c") setCov(!covOn);
   else if (e.key === "b") window.open("board.html", "altimeter-board");
+  else if (e.key === "Escape") { setCov(false); setHow(false); setInside(false); setCheck(false); } // scoreboard.js closes its panels
 });
 $("thr").addEventListener("input", renderCov);
 for (const b of document.querySelectorAll(".seg button")) b.addEventListener("click", () => { covSrc = b.dataset.src; renderCov(); });
@@ -1655,7 +1673,7 @@ setGauge(null);
 renderInside(null, "idle");
 setQueue(null, []);
 renderHow(null);
-$("excol").append(el("p", "noex", `Ask from a phone at ${location.host}.`));
+$("excol").append(el("p", "noex", askHere()));
 renderQuestion("", "No question yet").querySelector(".route").textContent = "";
 const params = new URLSearchParams(location.search);
 setHow(params.get("how") === "1");
@@ -1708,7 +1726,7 @@ function mockResult(withLayers) {
   const z = b0 + dims.reduce((s, d) => s + d.contribution, 0) + rest;
   const p_raw = sig(z);
   const layers = [];
-  for (let L = 0; L <= 36; L += 2) {
+  for (let L = 0; L <= 36; L++) {
     const zl = -1.2 + (L / 36) * 1.1 + (rnd() - 0.5) * 0.9;
     const pt = 0.5 + Math.min(0.45, Math.max(0, (L / 36) * 0.3 + (rnd() - 0.5) * 0.08));
     layers.push({ layer: L, p: +sig(zl).toFixed(4), z: +zl.toFixed(3), auroc: [+pt.toFixed(3), +(pt - 0.03).toFixed(3), +(pt + 0.03).toFixed(3)] });

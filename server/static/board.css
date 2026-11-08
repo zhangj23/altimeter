@@ -48,7 +48,12 @@ body {
 .head h1 {
   margin: 0; font-weight: 600; font-size: calc(var(--fs) * 1.5); letter-spacing: -0.01em; line-height: 1;
 }
-.counters { display: flex; gap: calc(var(--cw) * 2.5); }
+.title { display: flex; align-items: center; gap: calc(var(--cw) * 1.2); }
+#link { transition: opacity 200ms ease-out; }
+body:not(.stale) #link { opacity: 0; }
+.rows { transition: opacity 400ms ease-out; }
+body.stale .rows, body.stale .counters { opacity: 0.45; }
+.counters { transition: opacity 400ms ease-out; display: flex; gap: calc(var(--cw) * 2.5); }
 .counter { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .counter span { font-size: calc(var(--fs) * 0.5); color: var(--ink-2); line-height: 1; }
 
@@ -63,7 +68,7 @@ body {
     calc(4 * (var(--cw) + var(--gap)))
     calc(7 * (var(--cw) + var(--gap)))
     calc(12 * (var(--cw) + var(--gap)))
-    calc(10 * (var(--cw) + var(--gap)));
+    calc(13 * (var(--cw) + var(--gap)));
 }
 .cols { height: 34px; color: var(--ink-3); font-size: calc(var(--fs) * 0.46); font-weight: 500; }
 .row { height: var(--row); border-top: 1px solid var(--rule); }
